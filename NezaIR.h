@@ -1,9 +1,9 @@
 
 
-#ifndef IRremote_h
-#define IRremote_h
+#ifndef NezaIR_h
+#define NezaIR_h
 
-#define VERSION_IRREMOTE "1.0.0"
+#define VERSION_IRREMOTE "1.0.1"
 #define VERSION_IRREMOTE_MAJOR 1
 #define VERSION_IRREMOTE_MINOR 0
 
