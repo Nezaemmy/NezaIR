@@ -3,8 +3,8 @@
 #ifndef NezaIR_h
 #define NezaIR_h
 
-#define VERSION_IRREMOTE "1.0.2"
-#define VERSION_IRREMOTE_MAJOR 1
+#define VERSION_IRREMOTE "2.0.0"
+#define VERSION_IRREMOTE_MAJOR 2
 #define VERSION_IRREMOTE_MINOR 0
 
 // activate it for all cores that does not use the -flto flag, if you get false error messages regarding begin() during compilation.
