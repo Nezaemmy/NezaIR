@@ -9,11 +9,11 @@
 
 // -------------------- Multi-IR defaults (override in sketch before include) --------------------
 #ifndef IR_MAXCOUNTIR
-#define IR_MAXCOUNTIR 8          // you said 3–8 receivers
+#define IR_MAXCOUNTIR 8          
 #endif
 
 #ifndef MICROS_PER_TICK
-#define MICROS_PER_TICK 150      // good default for ATmega328P multi receiver
+#define MICROS_PER_TICK 150      
 #endif
 
 #ifndef RAW_BUFFER_LENGTH
