@@ -919,51 +919,71 @@ void timerConfigForReceive() {
 /***************************************
  * ESP32 boards - can use any pin for timer
  ***************************************/
+
 #elif defined(ESP32)
-//#  if defined(SEND_PWM_BY_TIMER)
-#if !defined(IR_SEND_PIN)
-#define IR_SEND_PIN 4 // can use any pin, no timer restrictions
+
+#ifndef IR_SEND_PIN
+#define IR_SEND_PIN 4 // default; can be any GPIO on ESP32
 #endif
 
-#define ENABLE_SEND_PWM_BY_TIMER    ledcWrite(LED_CHANNEL, IR_SEND_DUTY_CYCLE) // we must use channel here not pin number
-#define DISABLE_SEND_PWM_BY_TIMER   ledcWrite(LED_CHANNEL, 0)
-//#  endif
+// ---------- LEDC (PWM carrier for sending) ----------
+#ifndef LED_CHANNEL
+#define LED_CHANNEL 0
+#endif
 
-#  if ! defined(LED_CHANNEL)
-#define LED_CHANNEL 0 // The channel used for PWM 0 to 7 are high speed PWM channels
-#  endif
+// Convert duty % to 8-bit duty (0..255)
+#define LEDC_DUTY_FROM_PERCENT(pct)  ((uint32_t)((pct) * 255UL) / 100UL)
 
-#define TIMER_RESET_INTR_PENDING
-#define TIMER_ENABLE_RECEIVE_INTR   timerAlarmEnable(timer)
-#define TIMER_DISABLE_RECEIVE_INTR  timerEnd(timer); timerDetachInterrupt(timer)
-// Redefinition of ISR macro which creates a plain function now
-#  ifdef ISR
+// These macros are used by IRSend.hpp when SEND_PWM_BY_TIMER is enabled
+#define ENABLE_SEND_PWM_BY_TIMER   ledcWriteChannel(LED_CHANNEL, LEDC_DUTY_FROM_PERCENT(IR_SEND_DUTY_CYCLE))
+#define DISABLE_SEND_PWM_BY_TIMER  ledcWriteChannel(LED_CHANNEL, 0)
+
+// ---------- Timer ISR for receive ----------
+#define TIMER_RESET_INTR_PENDING   do{}while(0)
+
+// Use timerStart/Stop as enable/disable
+#define TIMER_ENABLE_RECEIVE_INTR  do { if (timer) timerStart(timer); } while(0)
+#define TIMER_DISABLE_RECEIVE_INTR do { \
+  if (timer) { \
+    timerStop(timer); \
+    timerDetachInterrupt(timer); \
+    timerEnd(timer); \
+    timer = nullptr; \
+  } \
+} while(0)
+
+#ifdef ISR
 #undef ISR
-#  endif
+#endif
+
+// ISR function declaration (ESP32 requires IRAM_ATTR)
 #define ISR() IRAM_ATTR void IRTimerInterruptHandler()
 IRAM_ATTR void IRTimerInterruptHandler();
 
-// Variables specific to the ESP32.
-// the ledc functions behave like hardware timers for us :-), so we do not require our own soft PWM generation code.
-hw_timer_t *timer;
+// Global timer handle used by the macros above
+hw_timer_t *timer = nullptr;
 
+// Configure LEDC for sending (carrier frequency)
 void timerConfigForSend(uint8_t aFrequencyKHz) {
-    ledcSetup(LED_CHANNEL, aFrequencyKHz * 1000, 8);  // 8 bit PWM resolution
-    ledcAttachPin(IrSender.sendPin, LED_CHANNEL);// bind pin to channel
+  // Arduino-ESP32 LEDC 3.x: ledcAttachChannel(pin, freq, resolution, channel) 
+  // Frequency is in Hz:
+  ledcAttachChannel(IrSender.sendPin, (uint32_t)aFrequencyKHz * 1000UL, 8, LED_CHANNEL);
 }
 
-/*
- * Set timer for interrupts every MICROS_PER_TICK (50 us)
- */
+// Configure receive timer interrupts every MICROS_PER_TICK microseconds
 void timerConfigForReceive() {
-    // ESP32 has a proper API to setup timers, no weird chip macros needed
-    // simply call the readable API versions :)
-    // 3 timers, choose #1, 80 divider for microsecond precision @80MHz clock, count_up = true
-    timer = timerBegin(1, 80, true);
-    timerAttachInterrupt(timer, &IRTimerInterruptHandler, 1);
-    // every 50 us, autoreload = true
-    timerAlarmWrite(timer, MICROS_PER_TICK, true);
+  // Arduino-ESP32 3.x: timerBegin(frequencyHz) 
+  // Use 1 MHz => 1 tick = 1 microsecond
+  timer = timerBegin(1000000);
+
+  // Arduino-ESP32 3.x: timerAttachInterrupt(timer, func) 
+  timerAttachInterrupt(timer, &IRTimerInterruptHandler);
+
+  // Arduino-ESP32 3.x: timerAlarm(timer, alarm_value, autoreload, count) 
+  // alarm_value is in timer ticks, with 1 MHz timer it's in microseconds
+  timerAlarm(timer, (uint64_t)MICROS_PER_TICK, true, 0);
 }
+
 
 /***************************************
  * SAMD boards like DUE and Zero
@@ -1020,7 +1040,7 @@ void timerConfigForReceive() {
     } // wait for sync
       // Reset TCx
     TC->CTRLA.reg = TC_CTRLA_SWRST;
-    // When writing a ‘1’ to the CTRLA.SWRST bit it will immediately read as ‘1’.
+    // When writing a Â‘1Â’ to the CTRLA.SWRST bit it will immediately read as Â‘1Â’.
     // CTRL.SWRST will be cleared by hardware when the peripheral has been reset.
     while (TC->CTRLA.bit.SWRST) {
     }
