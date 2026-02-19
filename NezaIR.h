@@ -1,19 +1,19 @@
-
+#pragma once
 #ifndef NezaIR_h
 #define NezaIR_h
 
 // -------------------- Version (prefer unique names) --------------------
-#define VERSION_NEZAIR "2.1.0"
+#define VERSION_NEZAIR "2.1.1"
 #define VERSION_NEZAIR_MAJOR 2
 #define VERSION_NEZAIR_MINOR 1
 
 // -------------------- Multi-IR defaults (override in sketch before include) --------------------
 #ifndef IR_MAXCOUNTIR
-#define IR_MAXCOUNTIR 8          
+#define IR_MAXCOUNTIR 8
 #endif
 
 #ifndef MICROS_PER_TICK
-#define MICROS_PER_TICK 150      
+#define MICROS_PER_TICK 150
 #endif
 
 #ifndef RAW_BUFFER_LENGTH
@@ -21,7 +21,7 @@
 #endif
 
 // Optional: exclude exotic protocols by default to save flash
-// Uncomment if you don’t need BOSEWAVE, MAGIQUEST, WHYNTER, LEGO_PF
+// Uncomment if you don't need BOSEWAVE, MAGIQUEST, WHYNTER, LEGO_PF
 // #define EXCLUDE_EXOTIC_PROTOCOLS
 
 // -------------------- Protocol selection defaults --------------------
@@ -37,7 +37,7 @@
 #define DECODE_RC5
 #define DECODE_RC6
 
-// Universal decoders (good for “any remote”)
+// Universal decoders (good for "any remote")
 #ifndef EXCLUDE_UNIVERSAL_PROTOCOLS
 #define DECODE_DISTANCE
 #define DECODE_HASH
@@ -72,7 +72,8 @@
 #define RECORD_GAP_MICROS_WARNING_THRESHOLD 20000
 #endif
 
-#define RECORD_GAP_TICKS (RECORD_GAP_MICROS / MICROS_PER_TICK)
+// Use constexpr for type-safe compile-time constant (requires C++11)
+static constexpr unsigned int RECORD_GAP_TICKS = RECORD_GAP_MICROS / MICROS_PER_TICK;
 
 // Input polarity
 // #define IR_INPUT_IS_ACTIVE_HIGH
@@ -82,7 +83,7 @@
 #define INPUT_MARK 0
 #endif
 
-// -------------------- Sending options (kept from your header) --------------------
+// -------------------- Sending options --------------------
 // #define SEND_PWM_BY_TIMER
 // #define USE_NO_SEND_PWM
 #if defined(SEND_PWM_BY_TIMER) && defined(USE_NO_SEND_PWM)
@@ -91,11 +92,11 @@
 #endif
 
 #ifndef PULSE_CORRECTION_NANOS
-# if defined(F_CPU)
-#define PULSE_CORRECTION_NANOS (48000000000L / F_CPU)
-# else
-#define PULSE_CORRECTION_NANOS 600
-# endif
+#  if defined(F_CPU)
+#    define PULSE_CORRECTION_NANOS (48000000000L / F_CPU)
+#  else
+#    define PULSE_CORRECTION_NANOS 600
+#  endif
 #endif
 
 // -------------------- Library includes --------------------
@@ -105,16 +106,14 @@
 #include "IRReceive.hpp"
 #include "IRSend.hpp"
 
-// -------------------- Legacy compatibility macros --------------------
-// Prefer to align RAWBUF with actual buffer length to avoid confusion
+// -------------------- Legacy compatibility macros (deprecated aliases) --------------------
+// These exist for backwards compatibility only. Prefer the modern names above.
 #ifndef RAWBUF
 #define RAWBUF RAW_BUFFER_LENGTH
 #endif
 
-#define REPEAT 0xFFFFFFFF
-#define USECPERTICK MICROS_PER_TICK
-#define MARK_EXCESS MARK_EXCESS_MICROS
+#define REPEAT          0xFFFFFFFF
+#define USECPERTICK     MICROS_PER_TICK
+#define MARK_EXCESS     MARK_EXCESS_MICROS
 
 #endif // NezaIR_h
-#pragma once
-
