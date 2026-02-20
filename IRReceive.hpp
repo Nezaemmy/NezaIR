@@ -516,45 +516,46 @@ static inline void ProcessOneIRParam(irparams_struct &p, uint8_t tIRInputLevel) 
         break;
 
     case IR_REC_STATE_MARK:
-        if (tIRInputLevel != INPUT_MARK) {
-            // Discard pulses shorter than MIN_SIGNAL_TICKS — these are noise
-            // from a floating/reconnecting pin, not real IR marks.
-            if (p.TickCounterForISR < MIN_SIGNAL_TICKS) {
-                p.TickCounterForISR = 0;
-                break;
-            }
-            if (p.rawlen >= RAW_BUFFER_LENGTH) {
-                p.OverflowFlag = true;
-                p.StateForISR  = IR_REC_STATE_STOP;
-            } else {
-                p.rawbuf[p.rawlen++] = clampTicksToRawbuf(p.TickCounterForISR);
-                p.StateForISR        = IR_REC_STATE_SPACE;
-            }
+      if (tIRInputLevel != INPUT_MARK) {
+        if (p.TickCounterForISR < MIN_SIGNAL_TICKS) {
             p.TickCounterForISR = 0;
+            break;
         }
-        break;
+        if (p.rawlen >= RAW_BUFFER_LENGTH) {
+            // Overflow from noise — go straight back to IDLE
+            // instead of STOP so the receiver self-recovers
+            // without needing resume() from the main loop.
+            p.OverflowFlag      = true;
+            p.rawlen            = 0;
+            p.StateForISR       = IR_REC_STATE_IDLE;  // NOT STOP
+        } else {
+            p.rawbuf[p.rawlen++] = clampTicksToRawbuf(p.TickCounterForISR);
+            p.StateForISR        = IR_REC_STATE_SPACE;
+        }
+        p.TickCounterForISR = 0;
+    }
+    break;
 
-    case IR_REC_STATE_SPACE:
-        if (tIRInputLevel == INPUT_MARK) {
-            // Discard spaces shorter than MIN_SIGNAL_TICKS — noise from
-            // a floating or reconnecting pin, not a real IR space.
-            if (p.TickCounterForISR < MIN_SIGNAL_TICKS) {
-                p.TickCounterForISR = 0;
-                break;
-            }
-            if (p.rawlen >= RAW_BUFFER_LENGTH) {
-                p.OverflowFlag = true;
-                p.StateForISR  = IR_REC_STATE_STOP;
-            } else {
-                p.rawbuf[p.rawlen++] = clampTicksToRawbuf(p.TickCounterForISR);
-                p.StateForISR        = IR_REC_STATE_MARK;
-            }
+case IR_REC_STATE_SPACE:
+    if (tIRInputLevel == INPUT_MARK) {
+        if (p.TickCounterForISR < MIN_SIGNAL_TICKS) {
             p.TickCounterForISR = 0;
-        } else if (p.TickCounterForISR > RECORD_GAP_TICKS) {
-            // Long silence — frame complete
-            p.StateForISR = IR_REC_STATE_STOP;
+            break;
         }
-        break;
+        if (p.rawlen >= RAW_BUFFER_LENGTH) {
+            // Same — self-recover to IDLE on overflow
+            p.OverflowFlag      = true;
+            p.rawlen            = 0;
+            p.StateForISR       = IR_REC_STATE_IDLE;  // NOT STOP
+        } else {
+            p.rawbuf[p.rawlen++] = clampTicksToRawbuf(p.TickCounterForISR);
+            p.StateForISR        = IR_REC_STATE_MARK;
+        }
+        p.TickCounterForISR = 0;
+    } else if (p.TickCounterForISR > RECORD_GAP_TICKS) {
+        p.StateForISR = IR_REC_STATE_STOP;  // legitimate frame end — keep STOP
+    }
+    break;
 
     case IR_REC_STATE_STOP:
         // Waiting for resume(); swallow any spurious marks
