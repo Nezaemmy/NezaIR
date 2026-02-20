@@ -3,7 +3,7 @@
 #define NezaIR_h
 
 // -------------------- Version (prefer unique names) --------------------
-#define VERSION_NEZAIR "2.1.1"
+#define VERSION_NEZAIR "2.1.2"
 #define VERSION_NEZAIR_MAJOR 2
 #define VERSION_NEZAIR_MINOR 1
 
@@ -62,6 +62,17 @@
 // -------------------- Receiver tuning (user may override) --------------------
 #ifndef MARK_EXCESS_MICROS
 #define MARK_EXCESS_MICROS 20
+#endif
+
+// Minimum number of ticks a mark or space must last to be considered a real
+// IR signal rather than noise. Pulses shorter than this are silently discarded
+// by the ISR. This prevents a floating or reconnected pin from flooding the
+// CPU with spurious interrupts and blocking the ESP32.
+// Default: 2 ticks = 2 * MICROS_PER_TICK (e.g. 2 * 150µs = 300µs).
+// Real IR protocol marks/spaces are always >= 300µs, so this is safe.
+// Set to 0 to disable filtering (not recommended on ESP32).
+#ifndef MIN_SIGNAL_TICKS
+#define MIN_SIGNAL_TICKS 2
 #endif
 
 #ifndef RECORD_GAP_MICROS
