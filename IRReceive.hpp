@@ -98,6 +98,12 @@ void IRrecv::setReceivePin(uint8_t aReceivePinNumber) {
     irparams.IRReceivePinMask              = digitalPinToBitMask(aReceivePinNumber);
     irparams.IRReceivePinPortInputRegister = portInputRegister(digitalPinToPort(aReceivePinNumber));
 #endif
+    // INPUT_PULLUP keeps the pin HIGH (idle) when the IR receiver is
+    // disconnected. Without this a floating pin oscillates randomly, causing
+    // an interrupt storm that blocks the CPU (especially on ESP32).
+    // Most IR receiver modules (VS1838B, TSOP4838 etc.) have open-collector
+    // outputs and work correctly with a pull-up.
+    pinMode(aReceivePinNumber, INPUT_PULLUP);
 }
 
 void IRrecv::start() {
@@ -140,7 +146,7 @@ void IRrecv::enableIRIn() {
 
     interrupts();
 
-    pinMode(irparams.IRReceivePin, INPUT);
+    pinMode(irparams.IRReceivePin, INPUT_PULLUP);  // Pull-up keeps pin stable when IR receiver is disconnected
 }
 
 void IRrecv::disableIRIn() {
@@ -511,6 +517,12 @@ static inline void ProcessOneIRParam(irparams_struct &p, uint8_t tIRInputLevel) 
 
     case IR_REC_STATE_MARK:
         if (tIRInputLevel != INPUT_MARK) {
+            // Discard pulses shorter than MIN_SIGNAL_TICKS — these are noise
+            // from a floating/reconnecting pin, not real IR marks.
+            if (p.TickCounterForISR < MIN_SIGNAL_TICKS) {
+                p.TickCounterForISR = 0;
+                break;
+            }
             if (p.rawlen >= RAW_BUFFER_LENGTH) {
                 p.OverflowFlag = true;
                 p.StateForISR  = IR_REC_STATE_STOP;
@@ -524,6 +536,12 @@ static inline void ProcessOneIRParam(irparams_struct &p, uint8_t tIRInputLevel) 
 
     case IR_REC_STATE_SPACE:
         if (tIRInputLevel == INPUT_MARK) {
+            // Discard spaces shorter than MIN_SIGNAL_TICKS — noise from
+            // a floating or reconnecting pin, not a real IR space.
+            if (p.TickCounterForISR < MIN_SIGNAL_TICKS) {
+                p.TickCounterForISR = 0;
+                break;
+            }
             if (p.rawlen >= RAW_BUFFER_LENGTH) {
                 p.OverflowFlag = true;
                 p.StateForISR  = IR_REC_STATE_STOP;
