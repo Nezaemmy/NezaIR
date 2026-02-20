@@ -3,7 +3,7 @@
 #define NezaIR_h
 
 // -------------------- Version (prefer unique names) --------------------
-#define VERSION_NEZAIR "2.1.2"
+#define VERSION_NEZAIR "2.1.3"
 #define VERSION_NEZAIR_MAJOR 2
 #define VERSION_NEZAIR_MINOR 1
 
