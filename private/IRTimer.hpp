@@ -256,7 +256,7 @@
 #define TIMER_ENABLE_RECEIVE_INTR   (TIMSK |= _BV(OCIE1A))
 #define TIMER_DISABLE_RECEIVE_INTR  (TIMSK &= ~_BV(OCIE1A))
 #  else
-#define TIMER_ENABLE_RECEIVE_INTR   (TIMSK1 = _BV(OCIE1A))          // Timer/Counter1, Output Compare A Match Interrupt Enable
+#define TIMER_ENABLE_RECEIVE_INTR   (TIMSK1 |= _BV(OCIE1A))          // Timer/Counter1, Output Compare A Match Interrupt Enable
 #define TIMER_DISABLE_RECEIVE_INTR  (TIMSK1 &= ~_BV(OCIE1A))
 #  endif
 
@@ -431,7 +431,7 @@ void timerConfigForReceive() {
 #  endif
 
 #define TIMER_RESET_INTR_PENDING
-#define TIMER_ENABLE_RECEIVE_INTR   (TIMSK3 = _BV(OCIE3B))
+#define TIMER_ENABLE_RECEIVE_INTR   (TIMSK3 |= _BV(OCIE3B))
 #define TIMER_DISABLE_RECEIVE_INTR  (TIMSK3 &= ~_BV(OCIE3B))
 #define TIMER_INTR_NAME             TIMER3_COMPB_vect
 
@@ -473,7 +473,7 @@ void timerConfigForReceive() {
 #  endif
 
 #define TIMER_RESET_INTR_PENDING
-#define TIMER_ENABLE_RECEIVE_INTR   (TIMSK4 = _BV(OCIE4A))
+#define TIMER_ENABLE_RECEIVE_INTR   (TIMSK4 |= _BV(OCIE4A))
 #define TIMER_DISABLE_RECEIVE_INTR  (TIMSK4 &= ~_BV(OCIE4A))
 #define TIMER_INTR_NAME             TIMER4_COMPA_vect
 
@@ -522,7 +522,7 @@ void timerConfigForReceive() {
 #  endif
 
 #define TIMER_RESET_INTR_PENDING
-#define TIMER_ENABLE_RECEIVE_INTR   (TIMSK4 = _BV(TOIE4))
+#define TIMER_ENABLE_RECEIVE_INTR   (TIMSK4 |= _BV(TOIE4))
 #define TIMER_DISABLE_RECEIVE_INTR  (TIMSK4 &= ~_BV(TOIE4))
 #define TIMER_INTR_NAME             TIMER4_OVF_vect
 
@@ -573,7 +573,7 @@ void timerConfigForReceive() {
 #  endif
 
 #define TIMER_RESET_INTR_PENDING
-#define TIMER_ENABLE_RECEIVE_INTR   (TIMSK5 = _BV(OCIE5A))
+#define TIMER_ENABLE_RECEIVE_INTR   (TIMSK5 |= _BV(OCIE5A))
 #define TIMER_DISABLE_RECEIVE_INTR  (TIMSK5 &= ~_BV(OCIE5A))
 #define TIMER_INTR_NAME             TIMER5_COMPA_vect
 
