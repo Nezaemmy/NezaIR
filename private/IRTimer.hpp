@@ -257,7 +257,7 @@
 #define TIMER_DISABLE_RECEIVE_INTR  (TIMSK &= ~_BV(OCIE1A))
 #  else
 #define TIMER_ENABLE_RECEIVE_INTR   (TIMSK1 = _BV(OCIE1A))          // Timer/Counter1, Output Compare A Match Interrupt Enable
-#define TIMER_DISABLE_RECEIVE_INTR  (TIMSK1 = 0)
+#define TIMER_DISABLE_RECEIVE_INTR  (TIMSK1 &= ~_BV(OCIE1A))
 #  endif
 
 #  if defined(USE_TIMER_CHANNEL_B)
@@ -334,8 +334,8 @@ void timerConfigForReceive() {
 #  endif // defined(SEND_PWM_BY_TIMER)
 
 #define TIMER_RESET_INTR_PENDING
-#define TIMER_ENABLE_RECEIVE_INTR   (TIMSK2 = _BV(OCIE2B))              // Output Compare Match A Interrupt Enable
-#define TIMER_DISABLE_RECEIVE_INTR  (TIMSK2 = 0)
+#define TIMER_ENABLE_RECEIVE_INTR   (TIMSK2 |= _BV(OCIE2B))
+#define TIMER_DISABLE_RECEIVE_INTR  (TIMSK2 &= ~_BV(OCIE2B))
 #define TIMER_INTR_NAME             TIMER2_COMPB_vect                   // We use TIMER2_COMPB_vect to be compatible with tone() library
 
 // The top value for the timer.  The modulation frequency will be F_CPU / 2 / OCR2A.
@@ -432,7 +432,7 @@ void timerConfigForReceive() {
 
 #define TIMER_RESET_INTR_PENDING
 #define TIMER_ENABLE_RECEIVE_INTR   (TIMSK3 = _BV(OCIE3B))
-#define TIMER_DISABLE_RECEIVE_INTR  (TIMSK3 = 0)
+#define TIMER_DISABLE_RECEIVE_INTR  (TIMSK3 &= ~_BV(OCIE3B))
 #define TIMER_INTR_NAME             TIMER3_COMPB_vect
 
 void timerConfigForSend(uint8_t aFrequencyKHz) {
@@ -474,7 +474,7 @@ void timerConfigForReceive() {
 
 #define TIMER_RESET_INTR_PENDING
 #define TIMER_ENABLE_RECEIVE_INTR   (TIMSK4 = _BV(OCIE4A))
-#define TIMER_DISABLE_RECEIVE_INTR  (TIMSK4 = 0)
+#define TIMER_DISABLE_RECEIVE_INTR  (TIMSK4 &= ~_BV(OCIE4A))
 #define TIMER_INTR_NAME             TIMER4_COMPA_vect
 
 void timerConfigForSend(uint8_t aFrequencyKHz) {
@@ -523,7 +523,7 @@ void timerConfigForReceive() {
 
 #define TIMER_RESET_INTR_PENDING
 #define TIMER_ENABLE_RECEIVE_INTR   (TIMSK4 = _BV(TOIE4))
-#define TIMER_DISABLE_RECEIVE_INTR  (TIMSK4 = 0)
+#define TIMER_DISABLE_RECEIVE_INTR  (TIMSK4 &= ~_BV(TOIE4))
 #define TIMER_INTR_NAME             TIMER4_OVF_vect
 
 void timerConfigForSend(uint8_t aFrequencyKHz) {
@@ -574,7 +574,7 @@ void timerConfigForReceive() {
 
 #define TIMER_RESET_INTR_PENDING
 #define TIMER_ENABLE_RECEIVE_INTR   (TIMSK5 = _BV(OCIE5A))
-#define TIMER_DISABLE_RECEIVE_INTR  (TIMSK5 = 0)
+#define TIMER_DISABLE_RECEIVE_INTR  (TIMSK5 &= ~_BV(OCIE5A))
 #define TIMER_INTR_NAME             TIMER5_COMPA_vect
 
 void timerConfigForSend(uint8_t aFrequencyKHz) {
@@ -926,29 +926,34 @@ void timerConfigForReceive() {
 #define IR_SEND_PIN 4 // default; can be any GPIO on ESP32
 #endif
 
-// ---------- LEDC (PWM carrier for sending) ----------
+// ---------- LEDC PWM carrier for sending ----------
 #ifndef LED_CHANNEL
 #define LED_CHANNEL 0
 #endif
 
-// Convert duty % to 8-bit duty (0..255)
-#define LEDC_DUTY_FROM_PERCENT(pct)  ((uint32_t)((pct) * 255UL) / 100UL)
+#define LEDC_DUTY_FROM_PERCENT(pct) ((uint32_t)((pct) * 255UL) / 100UL)
 
-// These macros are used by IRSend.hpp when SEND_PWM_BY_TIMER is enabled
 #define ENABLE_SEND_PWM_BY_TIMER   ledcWriteChannel(LED_CHANNEL, LEDC_DUTY_FROM_PERCENT(IR_SEND_DUTY_CYCLE))
 #define DISABLE_SEND_PWM_BY_TIMER  ledcWriteChannel(LED_CHANNEL, 0)
 
 // ---------- Timer ISR for receive ----------
-#define TIMER_RESET_INTR_PENDING   do{}while(0)
+#define TIMER_RESET_INTR_PENDING do{}while(0)
 
-// Use timerStart/Stop as enable/disable
-#define TIMER_ENABLE_RECEIVE_INTR  do { if (timer) timerStart(timer); } while(0)
+// Use a library-specific name, not generic "timer"
+static hw_timer_t *sIRReceiveTimer = nullptr;
+
+#define TIMER_ENABLE_RECEIVE_INTR  do { \
+  if (sIRReceiveTimer) { \
+    timerStart(sIRReceiveTimer); \
+  } \
+} while(0)
+
 #define TIMER_DISABLE_RECEIVE_INTR do { \
-  if (timer) { \
-    timerStop(timer); \
-    timerDetachInterrupt(timer); \
-    timerEnd(timer); \
-    timer = nullptr; \
+  if (sIRReceiveTimer) { \
+    timerStop(sIRReceiveTimer); \
+    timerDetachInterrupt(sIRReceiveTimer); \
+    timerEnd(sIRReceiveTimer); \
+    sIRReceiveTimer = nullptr; \
   } \
 } while(0)
 
@@ -956,32 +961,20 @@ void timerConfigForReceive() {
 #undef ISR
 #endif
 
-// ISR function declaration (ESP32 requires IRAM_ATTR)
 #define ISR() IRAM_ATTR void IRTimerInterruptHandler()
 IRAM_ATTR void IRTimerInterruptHandler();
 
-// Global timer handle used by the macros above
-hw_timer_t *timer = nullptr;
-
-// Configure LEDC for sending (carrier frequency)
 void timerConfigForSend(uint8_t aFrequencyKHz) {
-  // Arduino-ESP32 LEDC 3.x: ledcAttachChannel(pin, freq, resolution, channel) 
-  // Frequency is in Hz:
   ledcAttachChannel(IrSender.sendPin, (uint32_t)aFrequencyKHz * 1000UL, 8, LED_CHANNEL);
 }
 
-// Configure receive timer interrupts every MICROS_PER_TICK microseconds
 void timerConfigForReceive() {
-  // Arduino-ESP32 3.x: timerBegin(frequencyHz) 
-  // Use 1 MHz => 1 tick = 1 microsecond
-  timer = timerBegin(1000000);
+  // 1 MHz timer: 1 timer tick = 1 microsecond
+  sIRReceiveTimer = timerBegin(1000000);
 
-  // Arduino-ESP32 3.x: timerAttachInterrupt(timer, func) 
-  timerAttachInterrupt(timer, &IRTimerInterruptHandler);
+  timerAttachInterrupt(sIRReceiveTimer, &IRTimerInterruptHandler);
 
-  // Arduino-ESP32 3.x: timerAlarm(timer, alarm_value, autoreload, count) 
-  // alarm_value is in timer ticks, with 1 MHz timer it's in microseconds
-  timerAlarm(timer, (uint64_t)MICROS_PER_TICK, true, 0);
+  timerAlarm(sIRReceiveTimer, (uint64_t)MICROS_PER_TICK, true, 0);
 }
 
 
