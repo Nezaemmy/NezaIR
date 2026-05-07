@@ -87,7 +87,9 @@
 // Raw buffer element type
 // uint8_t saves RAM; switch to uint16_t if you need longer tick counts.
 // ---------------------------------------------------------------------------
+#ifndef RAWBUF_DATA_TYPE
 #define RAWBUF_DATA_TYPE uint8_t
+#endif
 #define LEARNEDNONMODULATEDTOKEN 0xFEU   ///< Used in ir_pronto
 // For uint16_t mode:
 // #define RAWBUF_DATA_TYPE uint16_t
@@ -100,25 +102,24 @@
  * data is available and before start/resume is called.
  */
 struct irparams_struct {
-    volatile uint8_t StateForISR;   ///< ISR state-machine state
-    uint8_t          IRReceivePin;  ///< Arduino pin connected to the IR detector
+    volatile uint8_t StateForISR;
+    uint8_t IRReceivePin;
 
 #if defined(__AVR__)
-    volatile uint8_t *IRReceivePinPortInputRegister;  ///< Direct port register for fast reads
-    uint8_t           IRReceivePinMask;               ///< Bit mask for the pin within its port
+    volatile uint8_t *IRReceivePinPortInputRegister;
+    uint8_t IRReceivePinMask;
 #endif
 
-    uint16_t TickCounterForISR;   ///< Counts MICROS_PER_TICK ticks; copied into rawbuf on each transition
-
-    bool OverflowFlag;            ///< Set when rawbuf fills before a gap is detected
-
-#if RAW_BUFFER_LENGTH <= 254       // saves ~75 bytes of program space and speeds up ISR
-    uint8_t      rawlen;           ///< Number of entries currently in rawbuf
+#if RAW_BUFFER_LENGTH <= 254
+    volatile uint8_t rawlen;
 #else
-    unsigned int rawlen;           ///< Number of entries currently in rawbuf (wide version)
+    volatile unsigned int rawlen;
 #endif
 
-    RAWBUF_DATA_TYPE rawbuf[RAW_BUFFER_LENGTH];  ///< Tick counts per mark/space; first entry is the inter-command gap
+    volatile uint16_t TickCounterForISR;
+    volatile bool OverflowFlag;
+
+    RAWBUF_DATA_TYPE rawbuf[RAW_BUFFER_LENGTH];
 };
 
 // ---------------------------------------------------------------------------
@@ -207,12 +208,14 @@ struct IRData {
  */
 class IRrecv {
 public:
-    struct irparams_struct irparams;  ///< Raw ISR data for this receiver instance
+    struct irparams_struct irparams;
 
     IRrecv();
     IRrecv(uint8_t aReceivePin);
     IRrecv(uint8_t aReceivePin, uint8_t aFeedbackLEDPin);
-    void setReceivePin(uint8_t aReceivePinNumber);
+    ~IRrecv();
+
+    bool isActive;
 
     void enableIRIn();
     void disableIRIn();
