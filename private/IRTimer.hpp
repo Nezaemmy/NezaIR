@@ -574,7 +574,7 @@ void timerConfigForReceive() {
 
 #define TIMER_RESET_INTR_PENDING
 #define TIMER_ENABLE_RECEIVE_INTR   (TIMSK5 |= _BV(OCIE5A))
-#define TIMER_DISABLE_RECEIVE_INTR  (TIMSK5 &= ~_BV(OCIE5A
+#define TIMER_DISABLE_RECEIVE_INTR  (TIMSK5 &= ~_BV(OCIE5A))
 #define TIMER_INTR_NAME             TIMER5_COMPA_vect
 
 void timerConfigForSend(uint8_t aFrequencyKHz) {
