@@ -12,7 +12,7 @@ __attribute((error("Version > 3.0.1"))) void UsageError(const char *details);
  */
 
 // The sender instance
-//IRsend IrSender;
+IRsend IrSender;
 
 IRsend::IRsend() {
 #if defined(IR_SEND_PIN)
