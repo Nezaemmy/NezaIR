@@ -217,88 +217,91 @@ public:
 
     bool isActive;
 
+    void setReceivePin(uint8_t aReceivePinNumber);
+
     void enableIRIn();
     void disableIRIn();
 
-    // ------------------------------------------------------------------
-    // Stream-like API
-    // ------------------------------------------------------------------
-    void begin(uint8_t aReceivePin, bool aEnableLEDFeedback = false,
+    void begin(uint8_t aReceivePin,
+               bool aEnableLEDFeedback = false,
                uint8_t aFeedbackLEDPin = USE_DEFAULT_FEEDBACK_LED_PIN);
-    void start();                                      ///< Alias for enableIRIn()
+
+    void start();
     void start(uint32_t aMicrosecondsToAddToGapCounter);
-    bool available();
-    IRData* read();                                    ///< Returns pointer to decoded data, or nullptr
-    void stop();                                       ///< Alias for disableIRIn()
+    void stop();
     void end();
 
+    bool available();
+    IRData *read();
     bool isIdle();
 
-    // ------------------------------------------------------------------
-    // Core decode / resume
-    // ------------------------------------------------------------------
-    bool decode();   ///< Check if data is available and attempt to decode
-    void resume();   ///< Enable receiving of the next value (clears STOP state)
+    bool decode();
+    void resume();
 
-    // ------------------------------------------------------------------
-    // Print helpers
-    // ------------------------------------------------------------------
-    void printIRResultShort(Print *aSerial);
-    void printIRResultMinimal(Print *aSerial);
-    void printIRResultRawFormatted(Print *aSerial, bool aOutputMicrosecondsInsteadOfTicks = true);
-    void printIRResultAsCVariables(Print *aSerial);
-    void compensateAndPrintIRResultAsCArray(Print *aSerial, bool aOutputMicrosecondsInsteadOfTicks = true);
-    void compensateAndPrintIRResultAsPronto(Print *aSerial, unsigned int frequency = 38000U);
+    void initDecodedIRData();
 
-    // ------------------------------------------------------------------
-    // Store helpers
-    // ------------------------------------------------------------------
-    void   compensateAndStoreIRResultInArray(uint8_t *aArrayPtr);
-    size_t compensateAndStorePronto(String *aString, unsigned int frequency = 38000U);
-
-    // ------------------------------------------------------------------
-    // Low-level decode primitives (used by individual protocol decoders)
-    // ------------------------------------------------------------------
     bool decodePulseDistanceData(uint8_t aNumberOfBits, uint8_t aStartOffset,
-                                 uint16_t aBitMarkMicros, uint16_t aOneSpaceMicros,
-                                 uint16_t aZeroSpaceMicros, bool aMSBfirst);
+                                 uint16_t aBitMarkMicros,
+                                 uint16_t aOneSpaceMicros,
+                                 uint16_t aZeroSpaceMicros,
+                                 bool aMSBfirst);
 
     bool decodePulseWidthData(uint8_t aNumberOfBits, uint8_t aStartOffset,
-                              uint16_t aOneMarkMicros, uint16_t aZeroMarkMicros,
-                              uint16_t aBitSpaceMicros, bool aMSBfirst);
+                              uint16_t aOneMarkMicros,
+                              uint16_t aZeroMarkMicros,
+                              uint16_t aBitSpaceMicros,
+                              bool aMSBfirst);
 
-    bool decodeBiPhaseData(uint_fast8_t aNumberOfBits, uint_fast8_t aStartOffset,
+    bool decodeBiPhaseData(uint_fast8_t aNumberOfBits,
+                           uint_fast8_t aStartOffset,
                            uint_fast8_t aStartClockCount,
                            uint_fast8_t aValueOfSpaceToMarkTransition,
                            uint16_t aBiphaseTimeUnit);
 
-    void    initBiphaselevel(uint8_t aRCDecodeRawbuffOffset, uint16_t aBiphaseTimeUnit);
+    void initBiphaselevel(uint8_t aRCDecodeRawbuffOffset,
+                          uint16_t aBiphaseTimeUnit);
+
     uint8_t getBiphaselevel();
 
-    // ------------------------------------------------------------------
     // Protocol decoders
-    // ------------------------------------------------------------------
     bool decodeBoseWave();
     bool decodeDenon();
     bool decodeJVC();
     bool decodeKaseikyo();
     bool decodeLegoPowerFunctions();
     bool decodeLG();
-    bool decodeMagiQuest();   ///< Not a fully standard pulse-distance protocol
+    bool decodeMagiQuest();
     bool decodeNEC();
     bool decodeRC5();
     bool decodeRC6();
     bool decodeSamsung();
-    bool decodeSharp();       ///< Redirected to decodeDenon()
+    bool decodeSharp();
     bool decodeSony();
     bool decodeDistance();
     bool decodeHash();
-    bool decodeShuzu();       ///< Template / example decoder
+    bool decodeShuzu();
     bool decodeWhynter();
 
-    // ------------------------------------------------------------------
-    // Legacy / deprecated API
-    // ------------------------------------------------------------------
+    // Print helpers
+    void printIRResultShort(Print *aSerial);
+    void printIRResultMinimal(Print *aSerial);
+    void printIRResultRawFormatted(Print *aSerial,
+                                   bool aOutputMicrosecondsInsteadOfTicks = true);
+    void printIRResultAsCVariables(Print *aSerial);
+    void compensateAndPrintIRResultAsCArray(Print *aSerial,
+                                            bool aOutputMicrosecondsInsteadOfTicks = true);
+    void compensateAndPrintIRResultAsPronto(Print *aSerial,
+                                            unsigned int frequency = 38000U);
+
+    void compensateAndStoreIRResultInArray(uint8_t *aArrayPtr);
+    size_t compensateAndStorePronto(String *aString,
+                                    unsigned int frequency = 38000U);
+
+    // Legacy LED API
+    void blink13(bool aEnableLEDFeedback)
+        __attribute__((deprecated("Use setLEDFeedback() or enableLEDFeedback() / disableLEDFeedback().")));
+
+    // Legacy old decoder API
 #if !defined(NO_LEGACY_COMPATIBILITY)
     bool decodeDenonOld(decode_results *aResults);
     bool decodeJVCMSB(decode_results *aResults);
@@ -310,28 +313,18 @@ public:
     bool decodeHashOld(decode_results *aResults);
 
     bool decode(decode_results *aResults)
-        __attribute__((deprecated("Use IrReceiver.decode() without a parameter and IrReceiver.decodedIRData.<field>.")));
+        __attribute__((deprecated("Use IrReceiver.decode() without a parameter and IrReceiver.decodedIRData.")));
 #endif
 
-    void blink13(bool aEnableLEDFeedback)
-        __attribute__((deprecated("Use setLEDFeedback() or enableLEDFeedback() / disableLEDFeedback().")));
-
-    // ------------------------------------------------------------------
-    // Internal helpers
-    // ------------------------------------------------------------------
-    void    initDecodedIRData();
     uint8_t compare(unsigned int oldval, unsigned int newval);
 
-    // ------------------------------------------------------------------
-    // Public data members
-    // ------------------------------------------------------------------
-    IRData decodedIRData;           ///< Decoded IR data; read by the application after decode()
+    IRData decodedIRData;
 
-    decode_type_t lastDecodedProtocol;  ///< Protocol of the most recently decoded frame
-    uint32_t      lastDecodedAddress;   ///< Address of the most recently decoded frame
-    uint32_t      lastDecodedCommand;   ///< Command of the most recently decoded frame
+    decode_type_t lastDecodedProtocol;
+    uint32_t lastDecodedAddress;
+    uint32_t lastDecodedCommand;
 
-    uint8_t repeatCount;  ///< Repeat counter used by some decoders (e.g. Denon auto-repeat)
+    uint8_t repeatCount;
 };
 
 extern uint8_t sBiphaseDecodeRawbuffOffset;  ///< Shared bi-phase decode state
