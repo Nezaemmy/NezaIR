@@ -1,273 +1,315 @@
 #include <Arduino.h>
-#include <string.h>
-#include "IRremoteInt.h"
 
-#ifndef DURATION_ARRAY_SIZE
+// Accept durations up to DURATION_ARRAY_SIZE * MICROS_PER_TICK (default: 50 * 50 = 2500 µs)
 #define DURATION_ARRAY_SIZE 50
-#endif
 
-#ifndef DISTANCE_DECODE_MSB_FIRST
-#define DISTANCE_DECODE_MSB_FIRST false
-#endif
+// Switch the decoding bit order to match your target protocol.
+// LSB_FIRST matches NEC and Kaseikyo/Panasonic; MSB_FIRST matches JVC, Denon.
+#define DISTANCE_DO_MSB_DECODING PROTOCOL_IS_LSB_FIRST
+//#define DISTANCE_DO_MSB_DECODING PROTOCOL_IS_MSB_FIRST
+
+// INFO output is enabled by default but can be suppressed by defining NO_INFO before including.
+// #define INFO
+
+//#define DEBUG  // Uncomment for verbose decode debug output from this file.
+
+#include "IRremoteInt.h"  // evaluates DEBUG / INFO for DEBUG_PRINT / INFO_PRINT macros
 
 /** \addtogroup Decoder Decoders and encoders for different protocols
  * @{
  */
+// Protocol reference: https://www.mikrocontroller.net/articles/IRMP_-_english#Codings
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
 
 #if defined(DEBUG)
-
+/**
+ * Dump a duration histogram array to Serial.
+ * Only compiled in when DEBUG is active.
+ */
 static void printDurations(uint8_t aArray[], uint8_t aMaxIndex) {
     for (uint_fast8_t i = 0; i <= aMaxIndex; i++) {
         if (i % 10 == 0) {
             if (i == 0) {
-                Serial.print(' ');
+                Serial.print(' ');  // indent the leading "0"
             } else {
                 Serial.println();
             }
-
             Serial.print(i);
             Serial.print(F(":"));
         }
-
-        Serial.print(F(" "));
+        Serial.print(F(" | "));
         Serial.print(aArray[i]);
     }
-
     Serial.println();
 }
+#endif  // DEBUG
 
-#endif // DEBUG
+/**
+ * Aggregate contiguous non-zero runs in aArray[] into single weighted-average
+ * bins and record the two resulting bin indices as aShortIndex / aLongIndex.
+ *
+ * @return true  – at most 2 distinct duration clusters found (pulse-width or
+ *                 pulse-distance protocol likely)
+ * @return false – 3 or more clusters found (e.g. RC5); caller should give up
+ */
+static bool aggregateArrayCounts(uint8_t aArray[], uint8_t aMaxIndex,
+                                 uint8_t *aShortIndex, uint8_t *aLongIndex) {
+    uint8_t  tSum         = 0;
+    uint16_t tWeightedSum = 0;
 
-static bool aggregateArrayCounts(uint8_t aArray[],
-                                 uint8_t aMaxIndex,
-                                 uint8_t *aShortIndex,
-                                 uint8_t *aLongIndex) {
-    uint8_t clusterCount = 0;
-    uint8_t clusterIndex[2] = {0, 0};
-
-    uint8_t i = 0;
-
-    while (i <= aMaxIndex) {
-        while (i <= aMaxIndex && aArray[i] == 0) {
-            i++;
+    for (uint_fast8_t i = 0; i <= aMaxIndex; i++) {
+        uint8_t tCurrentDurations = aArray[i];
+        if (tCurrentDurations != 0) {
+            tSum         += tCurrentDurations;
+            tWeightedSum += (uint16_t)(tCurrentDurations * i);
+            aArray[i]     = 0;
         }
 
-        if (i > aMaxIndex) break;
+        // End of a run: either a zero gap or the last element with pending sum
+        if ((tCurrentDurations == 0 || i == aMaxIndex) && tSum != 0) {
+            uint8_t tAggregateIndex = (uint8_t)((tWeightedSum + (tSum / 2)) / tSum);  // rounded average
+            aArray[tAggregateIndex] = tSum;  // write back aggregate (removing this line costs +2 bytes — compiler quirk)
 
-        uint16_t weightedSum = 0;
-        uint16_t countSum    = 0;
+            if (*aShortIndex == 0) {
+                *aShortIndex = tAggregateIndex;
+            } else if (*aLongIndex == 0) {
+                *aLongIndex = tAggregateIndex;
+            } else {
+                // Three or more bins → not a simple pulse-width / distance protocol
+                return false;
+            }
 
-        while (i <= aMaxIndex && aArray[i] != 0) {
-            weightedSum += (uint16_t)aArray[i] * i;
-            countSum    += aArray[i];
-            i++;
+            tSum         = 0;
+            tWeightedSum = 0;
         }
-
-        if (countSum == 0) continue;
-
-        if (clusterCount >= 2) {
-            return false;
-        }
-
-        clusterIndex[clusterCount++] = (uint8_t)((weightedSum + (countSum / 2)) / countSum);
     }
-
-    if (clusterCount == 0) {
-        return false;
-    }
-
-    if (clusterCount == 1) {
-        *aShortIndex = clusterIndex[0];
-        *aLongIndex  = clusterIndex[0];
-        return true;
-    }
-
-    if (clusterIndex[0] <= clusterIndex[1]) {
-        *aShortIndex = clusterIndex[0];
-        *aLongIndex  = clusterIndex[1];
-    } else {
-        *aShortIndex = clusterIndex[1];
-        *aLongIndex  = clusterIndex[0];
-    }
-
     return true;
 }
 
-static bool fillDurationHistogram(IRData *aIRData,
-                                  uint8_t aStartIndex,
-                                  uint8_t aStep,
-                                  uint8_t aDurationArray[],
-                                  uint8_t *aMaxDurationIndex) {
-    memset(aDurationArray, 0, DURATION_ARRAY_SIZE);
+// ---------------------------------------------------------------------------
+// IRrecv::decodeDistance
+// ---------------------------------------------------------------------------
 
-    *aMaxDurationIndex = 0;
-
-    if (aIRData == nullptr || aIRData->rawDataPtr == nullptr) return false;
-
-    uint16_t rawlen = aIRData->rawDataPtr->rawlen;
-
-    if (rawlen <= aStartIndex) return false;
-
-    for (uint16_t i = aStartIndex; i < rawlen; i += aStep) {
-        uint16_t durationTicks = aIRData->rawDataPtr->rawbuf[i];
-
-        if (durationTicks >= DURATION_ARRAY_SIZE) {
-            return false;
-        }
-
-        aDurationArray[durationTicks]++;
-
-        if (*aMaxDurationIndex < durationTicks) {
-            *aMaxDurationIndex = durationTicks;
-        }
-    }
-
-    return true;
-}
-
+/*
+ * Try to decode a pulse-width or pulse-distance protocol:
+ *  1. Analyse all space and mark lengths and fill histogram arrays.
+ *  2. Aggregate histogram bins — expect at most 2 distinct durations each.
+ *  3. Decide whether we have pulse-width or pulse-distance encoding.
+ *  4. Decode up to 32 bits per pass (repeated for payloads > 32 bits).
+ *
+ * Result: raw data only — no address / command split.
+ */
 bool IRrecv::decodeDistance() {
-#if !defined(DECODE_DISTANCE)
+    uint8_t tDurationArray[DURATION_ARRAY_SIZE];
+
+    // Retrieve the active tick resolution (may differ per receiver instance)
+    const int iMICROS_PER_TICK = getMICROS_PER_TICK();
+
+    // Require at least 8 data bits: 2*8 transitions + 2 header + 2 stop = 20
+    if (decodedIRData.rawDataPtr->rawlen < (2 * 8) + 4) {
+        DEBUG_PRINT(F("PULSE_DISTANCE: "));
+        DEBUG_PRINT(F("Data length="));
+        DEBUG_PRINT(decodedIRData.rawDataPtr->rawlen);
+        DEBUG_PRINTLN(F(" is less than 20"));
+        return false;
+    }
+
+    // ------------------------------------------------------------------
+    // 1a. Histogram space durations (even indices; skip header & stop)
+    // ------------------------------------------------------------------
+    memset(tDurationArray, 0, sizeof(tDurationArray));
+    uint8_t tMaxDurationIndex = 0;
+
+    for (uint16_t i = 4; i < (decodedIRData.rawDataPtr->rawlen - 2); i += 2) {
+        uint8_t tDurationTicks = decodedIRData.rawDataPtr->rawbuf[i];
+        if (tDurationTicks >= DURATION_ARRAY_SIZE) {
+    DEBUG_PRINT(F("PULSE_DISTANCE: "));
+    DEBUG_PRINTLN(F("Space duration too large for histogram"));
     return false;
-#else
-    if (decodedIRData.rawDataPtr == nullptr) return false;
+}
 
-    const uint16_t rawlen = decodedIRData.rawDataPtr->rawlen;
-
-    /*
-     * rawbuf layout:
-     * [0] gap
-     * [1] header mark
-     * [2] header space
-     * [3] first bit mark
-     * [4] first bit space
-     * ...
-     */
-    if (rawlen < 20) {
-        DEBUG_PRINT(F("DISTANCE: "));
-        DEBUG_PRINT(F("rawlen="));
-        DEBUG_PRINT(rawlen);
-        DEBUG_PRINTLN(F(" is too short"));
-        return false;
+tDurationArray[tDurationTicks]++;
+if (tMaxDurationIndex < tDurationTicks) {
+    tMaxDurationIndex = tDurationTicks;
+}
     }
 
-    uint8_t markDurationArray[DURATION_ARRAY_SIZE];
-    uint8_t spaceDurationArray[DURATION_ARRAY_SIZE];
-
-    uint8_t maxMarkIndex  = 0;
-    uint8_t maxSpaceIndex = 0;
-
-    /*
-     * Data marks start at index 3.
-     * Data spaces start at index 4.
-     */
-    if (!fillDurationHistogram(&decodedIRData, 3, 2, markDurationArray, &maxMarkIndex)) {
-        DEBUG_PRINTLN(F("DISTANCE: mark histogram failed"));
-        return false;
-    }
-
-    if (!fillDurationHistogram(&decodedIRData, 4, 2, spaceDurationArray, &maxSpaceIndex)) {
-        DEBUG_PRINTLN(F("DISTANCE: space histogram failed"));
+    uint8_t tSpaceTicksShort = 0;
+    uint8_t tSpaceTicksLong  = 0;
+    if (!aggregateArrayCounts(tDurationArray, tMaxDurationIndex, &tSpaceTicksShort, &tSpaceTicksLong)) {
+        DEBUG_PRINT(F("PULSE_DISTANCE: "));
+        DEBUG_PRINTLN(F("Space aggregation failed, more than 2 distinct duration values found"));
         return false;
     }
 
 #if defined(DEBUG)
-    Serial.println(F("DISTANCE mark histogram:"));
-    printDurations(markDurationArray, maxMarkIndex);
-
-    Serial.println(F("DISTANCE space histogram:"));
-    printDurations(spaceDurationArray, maxSpaceIndex);
+    Serial.println(F("Space:"));
+    printDurations(tDurationArray, tMaxDurationIndex);
 #endif
 
-    uint8_t markTicksShort  = 0;
-    uint8_t markTicksLong   = 0;
-    uint8_t spaceTicksShort = 0;
-    uint8_t spaceTicksLong  = 0;
+    // ------------------------------------------------------------------
+    // 1b. Histogram mark durations (odd indices; skip header & stop)
+    // ------------------------------------------------------------------
+    memset(tDurationArray, 0, sizeof(tDurationArray));
+    tMaxDurationIndex = 0;
 
-    if (!aggregateArrayCounts(markDurationArray, maxMarkIndex,
-                              &markTicksShort, &markTicksLong)) {
-        DEBUG_PRINTLN(F("DISTANCE: mark aggregation failed"));
-        return false;
+    for (uint16_t i = 3; i < (decodedIRData.rawDataPtr->rawlen - 2); i += 2) {
+        uint8_t tDurationTicks = decodedIRData.rawDataPtr->rawbuf[i];
+        if (tDurationTicks >= DURATION_ARRAY_SIZE) {
+    DEBUG_PRINT(F("PULSE_DISTANCE: "));
+    DEBUG_PRINTLN(F("Space duration too large for histogram"));
+    return false;
+}
+
+tDurationArray[tDurationTicks]++;
+if (tMaxDurationIndex < tDurationTicks) {
+    tMaxDurationIndex = tDurationTicks;
+}
     }
 
-    if (!aggregateArrayCounts(spaceDurationArray, maxSpaceIndex,
-                              &spaceTicksShort, &spaceTicksLong)) {
-        DEBUG_PRINTLN(F("DISTANCE: space aggregation failed"));
-        return false;
+    uint8_t tMarkTicksShort = 0;
+    uint8_t tMarkTicksLong  = 0;
+    if (!aggregateArrayCounts(tDurationArray, tMaxDurationIndex, &tMarkTicksShort, &tMarkTicksLong)) {
+        DEBUG_PRINT(F("PULSE_DISTANCE: "));
+        DEBUG_PRINTLN(F("Mark aggregation failed, more than 2 distinct duration values found"));
+        return false;  // BUG FIX: was missing — function previously continued with garbage tick values
     }
 
-    const bool marksAreDifferent  = (markTicksShort != markTicksLong);
-    const bool spacesAreDifferent = (spaceTicksShort != spaceTicksLong);
+#if defined(DEBUG)
+    Serial.println(F("Mark:"));
+    printDurations(tDurationArray, tMaxDurationIndex);
+#endif
 
-    /*
-     * Number of bits:
-     * rawlen includes gap/header.
-     * Data starts at rawbuf[3] as mark/space pairs.
-     */
-    uint8_t numberOfBits = (uint8_t)((rawlen - 3) / 2);
+    // ------------------------------------------------------------------
+    // 2. Compute bit count and multi-word decode parameters
+    // ------------------------------------------------------------------
+    // rawlen/2 gives total mark+space pairs; subtract 2 for header and stop.
+    uint16_t tNumberOfBits = (uint16_t)(decodedIRData.rawDataPtr->rawlen / 2) - 2;
+    uint8_t  tStartIndex   = 3;
 
-    if (numberOfBits == 0 || numberOfBits > 32) {
-        DEBUG_PRINTLN(F("DISTANCE: invalid bit count"));
-        return false;
-    }
+    decodedIRData.numberOfBits = tNumberOfBits;
 
-    const uint16_t tickMicros = (uint16_t)getMICROS_PER_TICK();
+    // Number of additional 32-bit words needed beyond the first
+    // Formula: ceil(tNumberOfBits / 32) - 1  ==  (tNumberOfBits - 1) / 32
+    uint8_t tNumberOfAdditionalLong = (uint8_t)((tNumberOfBits - 1) / 32);
 
-    bool decoded = false;
+    // ------------------------------------------------------------------
+// 3 & 4. Decode — pulse-width or pulse-distance
+// ------------------------------------------------------------------
+const bool tHasTwoMarkDurations  = (tMarkTicksLong != 0);
+const bool tHasTwoSpaceDurations = (tSpaceTicksLong != 0);
 
-    if (!marksAreDifferent && spacesAreDifferent) {
-        /*
-         * Pulse-distance protocol:
-         * bit value is encoded in the space duration.
-         */
-        decoded = decodePulseDistanceData(
-            numberOfBits,
-            3,
-            (uint16_t)markTicksShort * tickMicros,
-            (uint16_t)spaceTicksLong * tickMicros,
-            (uint16_t)spaceTicksShort * tickMicros,
-            DISTANCE_DECODE_MSB_FIRST
-        );
-    } else if (marksAreDifferent && !spacesAreDifferent) {
-        /*
-         * Pulse-width protocol:
-         * bit value is encoded in the mark duration.
-         */
-        decoded = decodePulseWidthData(
-            numberOfBits,
-            3,
-            (uint16_t)markTicksLong * tickMicros,
-            (uint16_t)markTicksShort * tickMicros,
-            (uint16_t)spaceTicksShort * tickMicros,
-            DISTANCE_DECODE_MSB_FIRST
-        );
+if (tHasTwoMarkDurations && tHasTwoSpaceDurations) {
+    DEBUG_PRINT(F("PULSE_DISTANCE: "));
+    DEBUG_PRINTLN(F("Both marks and spaces have 2 durations - ambiguous"));
+    return false;
+}
+
+if (!tHasTwoMarkDurations && !tHasTwoSpaceDurations) {
+    DEBUG_PRINT(F("PULSE_DISTANCE: "));
+    DEBUG_PRINTLN(F("Only 1 distinct duration value for each space and mark found"));
+    return false;
+}
+
+if (tHasTwoMarkDurations && !tHasTwoSpaceDurations) {
+    // ---- Pulse-WIDTH protocol (mark length encodes the bit) ----
+        if (tMarkTicksLong == 0) {
+            DEBUG_PRINT(F("PULSE_DISTANCE: "));
+            DEBUG_PRINTLN(F("Only 1 distinct duration value for each space and mark found"));
+            return false;
+        }
+
+        for (uint8_t i = 0; i <= tNumberOfAdditionalLong; ++i) {
+            uint8_t tBitsThisPass = (tNumberOfBits > 32) ? 32 : (uint8_t)tNumberOfBits;
+
+            if (!decodePulseWidthData(tBitsThisPass, tStartIndex,
+                                      tMarkTicksLong  * iMICROS_PER_TICK,
+                                      tMarkTicksShort * iMICROS_PER_TICK,
+                                      tSpaceTicksShort * iMICROS_PER_TICK,
+                                      DISTANCE_DO_MSB_DECODING)) {
+                DEBUG_PRINT(F("PULSE_WIDTH: "));
+                DEBUG_PRINTLN(F("Decode failed"));
+                return false;
+            }
+
+            if (i == 0) {
+                // Print header timing once at the start of the first word
+                INFO_PRINTLN();
+                INFO_PRINT(F("PULSE_WIDTH:"));
+                INFO_PRINT(F(" HeaderMarkMicros="));
+                INFO_PRINT(decodedIRData.rawDataPtr->rawbuf[1] * iMICROS_PER_TICK);
+                INFO_PRINT(F(" HeaderSpaceMicros="));
+                INFO_PRINT(decodedIRData.rawDataPtr->rawbuf[2] * iMICROS_PER_TICK);
+                INFO_PRINT(F(" OneMarkMicros="));
+                INFO_PRINT(tMarkTicksLong  * iMICROS_PER_TICK);
+                INFO_PRINT(F(" ZeroMarkMicros="));
+                INFO_PRINT(tMarkTicksShort * iMICROS_PER_TICK);
+                INFO_PRINT(F(" SpaceMicros="));
+                INFO_PRINTLN(tSpaceTicksShort * iMICROS_PER_TICK);
+            }
+
+            if (tNumberOfAdditionalLong > 0) {
+                INFO_PRINT(F(" 0x"));
+                INFO_PRINT(decodedIRData.decodedRawData, HEX);
+                tStartIndex    += 64;
+                tNumberOfBits  -= 32;
+            }
+        }
+
+        decodedIRData.extra    = (uint16_t)((tMarkTicksShort << 8) | tMarkTicksLong);
+        decodedIRData.protocol = PULSE_WIDTH;
+
     } else {
-        /*
-         * Both mark and space have two clusters, or both have one cluster.
-         * This is ambiguous for this generic decoder.
-         */
-        DEBUG_PRINTLN(F("DISTANCE: ambiguous mark/space clusters"));
-        return false;
+        // ---- Pulse-DISTANCE protocol (space length encodes the bit) ----
+        for (uint8_t i = 0; i <= tNumberOfAdditionalLong; ++i) {
+            uint8_t tBitsThisPass = (tNumberOfBits > 32) ? 32 : (uint8_t)tNumberOfBits;
+
+            if (!decodePulseDistanceData(tBitsThisPass, tStartIndex,
+                                         tMarkTicksShort  * iMICROS_PER_TICK,
+                                         tSpaceTicksLong  * iMICROS_PER_TICK,
+                                         tSpaceTicksShort * iMICROS_PER_TICK,
+                                         DISTANCE_DO_MSB_DECODING)) {
+                DEBUG_PRINT(F("PULSE_DISTANCE: "));
+                DEBUG_PRINTLN(F("Decode failed"));
+                return false;
+            }
+
+            if (i == 0) {
+                // Print header timing once at the start of the first word
+                INFO_PRINTLN();
+                INFO_PRINT(F("PULSE_DISTANCE:"));
+                INFO_PRINT(F(" HeaderMarkMicros="));
+                INFO_PRINT(decodedIRData.rawDataPtr->rawbuf[1] * iMICROS_PER_TICK);
+                INFO_PRINT(F(" HeaderSpaceMicros="));
+                INFO_PRINT(decodedIRData.rawDataPtr->rawbuf[2] * iMICROS_PER_TICK);
+                INFO_PRINT(F(" MarkMicros="));
+                INFO_PRINT(tMarkTicksShort  * iMICROS_PER_TICK);
+                INFO_PRINT(F(" OneSpaceMicros="));
+                INFO_PRINT(tSpaceTicksLong  * iMICROS_PER_TICK);
+                INFO_PRINT(F(" ZeroSpaceMicros="));
+                INFO_PRINTLN(tSpaceTicksShort * iMICROS_PER_TICK);
+            }
+
+            if (tNumberOfAdditionalLong > 0) {
+                INFO_PRINT(F(" 0x"));
+                INFO_PRINT(decodedIRData.decodedRawData, HEX);
+                tStartIndex   += 64;
+                tNumberOfBits -= 32;
+            }
+        }
+
+        decodedIRData.extra    = (uint16_t)((tSpaceTicksShort << 8) | tSpaceTicksLong);
+        decodedIRData.protocol = PULSE_DISTANCE;
     }
 
-    if (!decoded) {
-        DEBUG_PRINTLN(F("DISTANCE: primitive decoder failed"));
-        return false;
-    }
-
-    decodedIRData.protocol     = DISTANCE;
-    decodedIRData.address      = 0;
-    decodedIRData.command      = 0;
-    decodedIRData.extra        = rawlen;
-    decodedIRData.numberOfBits = numberOfBits;
-
-    if (DISTANCE_DECODE_MSB_FIRST) {
+    if (DISTANCE_DO_MSB_DECODING) {
         decodedIRData.flags = IRDATA_FLAGS_IS_MSB_FIRST;
-    } else {
-        decodedIRData.flags = IRDATA_FLAGS_IS_LSB_FIRST;
     }
 
     return true;
-#endif
 }
 
 /** @} */
