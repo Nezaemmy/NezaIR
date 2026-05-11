@@ -3,10 +3,10 @@
 #define NEZAIR_H
 
 // -------------------- Version --------------------
-#define VERSION_NEZAIR "2.2.1"
+#define VERSION_NEZAIR "2.2.2"
 #define VERSION_NEZAIR_MAJOR 2
 #define VERSION_NEZAIR_MINOR 2
-#define VERSION_NEZAIR_PATCH 1
+#define VERSION_NEZAIR_PATCH 2
 
 // -------------------- Multi-IR defaults --------------------
 #ifndef IR_MAXCOUNTIR
@@ -92,28 +92,12 @@ static constexpr unsigned int RECORD_GAP_TICKS = RECORD_GAP_MICROS / MICROS_PER_
 # endif
 #endif
 
-// -------------------- Core declarations --------------------
+// -------------------- Library includes --------------------
 #include "IRremoteInt.h"
-
-// -------------------- Implementation mode --------------------
-// Use this in ONE file only:
-//
-// #define NEZAIR_IMPLEMENTATION
-// #include <NezaIR.h>
-//
-// Do not define NEZAIR_IMPLEMENTATION in more than one translation unit.
-
-#ifdef NEZAIR_IMPLEMENTATION
-
 #include "private/IRTimer.hpp"
 #include "IRFeedbackLED.hpp"
 #include "IRReceive.hpp"
 #include "IRSend.hpp"
-
-IRrecv IrReceiver;
-IRsend IrSender;
-
-#endif // NEZAIR_IMPLEMENTATION
 
 // -------------------- Legacy compatibility macros --------------------
 #ifndef RAWBUF
