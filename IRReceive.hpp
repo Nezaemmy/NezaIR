@@ -530,7 +530,7 @@ int getMICROS_PER_TICK() {
  * then shared across all receiver state machines to save cycles.
  * ------------------------------------------------------------------------------------------------- */
 #if defined(ESP32)
-#include "soc/gpio_struct.h"
+#include "driver/gpio.h"
 #endif
 
 static inline uint8_t readInputLevelFor(irparams_struct &p,
@@ -547,11 +547,7 @@ static inline uint8_t readInputLevelFor(irparams_struct &p,
     (void)pinc;
     (void)pind;
 
-    if (p.IRReceivePin < 32) {
-        return (uint8_t)((GPIO.in >> p.IRReceivePin) & 1U);
-    } else {
-        return (uint8_t)((GPIO.in1.val >> (p.IRReceivePin - 32)) & 1U);
-    }
+    return (uint8_t)gpio_get_level((gpio_num_t)p.IRReceivePin);
 
 #else
 
