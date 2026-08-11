@@ -5,139 +5,96 @@
 #include <Arduino.h>
 #include "IRremoteInt.h"
 #include "CppList.hpp"
+#include "MultiIRShared.h"
+#include "private/IRTimer.hpp"
+#include "driver/gpio.h"
 
 #ifndef IR_INVALID_PIN
 #define IR_INVALID_PIN 0xFF
 #endif
 
-/** \addtogroup Receiving Receiving IR data for multiple protocols
- * @{
+/**
+ * @brief Clamp a 16-bit tick count to the configured raw-buffer element size.
  */
-
-/* -------------------------------------------------------------------------------------------------
- * MultiIR registry: function-static singleton avoids static-init-order problems
- * ------------------------------------------------------------------------------------------------- */
-static inline CppList& IrParamsList() {
-    static CppList list;
-    return list;
-}
-
-/* -------------------------------------------------------------------------------------------------
- * Global receiver instance (kept for compatibility with standard IRremote usage)
- * ------------------------------------------------------------------------------------------------- */
-IRrecv IrReceiver;
-
-/* -------------------------------------------------------------------------------------------------
- * Shared timer enable refcount
- * The timer ISR is global on ATmega328P, so we only start/stop it when the
- * number of active receivers crosses zero.
- * ------------------------------------------------------------------------------------------------- */
-static volatile uint8_t gActiveReceivers = 0;
-
-/* -------------------------------------------------------------------------------------------------
- * Safe tick clamping for RAWBUF_DATA_TYPE
- * If RAWBUF_DATA_TYPE is uint8_t (the default), clamp tick values to 0xFF to
- * prevent silent wraparound. No-op when the type is wide enough.
- * ------------------------------------------------------------------------------------------------- */
 static inline RAWBUF_DATA_TYPE clampTicksToRawbuf(uint16_t ticks) {
-    if (sizeof(RAWBUF_DATA_TYPE) == 1 && ticks > 0xFF) {
-        return (RAWBUF_DATA_TYPE)0xFF;
+    if (sizeof(RAWBUF_DATA_TYPE) == 1 && ticks > UINT8_MAX) {
+        return static_cast<RAWBUF_DATA_TYPE>(UINT8_MAX);
     }
-    return (RAWBUF_DATA_TYPE)ticks;
+
+    return static_cast<RAWBUF_DATA_TYPE>(ticks);
 }
 
-/* -------------------------------------------------------------------------------------------------
- * IRrecv constructors
- * ------------------------------------------------------------------------------------------------- */
+// ============================================================================
+// IRrecv construction and configuration
+// ============================================================================
+
 IRrecv::IRrecv() {
-    decodedIRData.rawDataPtr = &irparams;  // bind decoded data to this instance's raw buffer
+    decodedIRData.rawDataPtr = &irparams;
 
-    // Do not configure GPIO0 by default.
-    // Start with an invalid pin until the user calls setReceivePin() or begin().
-    irparams.IRReceivePin = IR_INVALID_PIN;
-
-#if defined(__AVR__)
-    irparams.IRReceivePinMask = 0;
-    irparams.IRReceivePinPortInputRegister = nullptr;
-#endif
-
-    irparams.StateForISR       = IR_REC_STATE_IDLE;
+    irparams.IRReceivePin     = IR_INVALID_PIN;
+    irparams.StateForISR      = IR_REC_STATE_IDLE;
     irparams.TickCounterForISR = 0;
-    irparams.OverflowFlag      = false;
-    irparams.rawlen            = 0;
+    irparams.OverflowFlag     = false;
+    irparams.rawlen           = 0;
 
     isActive = false;
-
-#if !defined(DISABLE_LED_FEEDBACK_FOR_RECEIVE)
-    setLEDFeedback(0, false);
-#endif
-
-    // Register this receiver's irparams in the global ISR list.
-    // Add() is idempotent so calling this from multiple constructors is safe.
-    noInterrupts();
-    IrParamsList().Add(&irparams);
-    interrupts();
 }
 
-IRrecv::IRrecv(uint8_t aReceivePin) : IRrecv() {
-    setReceivePin(aReceivePin);
+IRrecv::IRrecv(uint8_t receivePin)
+    : IRrecv() {
+    setReceivePin(receivePin);
 }
 
-IRrecv::IRrecv(uint8_t aReceivePin, uint8_t aFeedbackLEDPin) : IRrecv() {
-    setReceivePin(aReceivePin);
-#if !defined(DISABLE_LED_FEEDBACK_FOR_RECEIVE)
-    setLEDFeedback(aFeedbackLEDPin, false);
-#else
-    (void)aFeedbackLEDPin;
-#endif
+IRrecv::IRrecv(uint8_t receivePin, uint8_t feedbackLedPin)
+    : IRrecv() {
+    setReceivePin(receivePin);
+    setLEDFeedback(feedbackLedPin, false);
 }
 
-/* -------------------------------------------------------------------------------------------------
- * Stream-like API
- * ------------------------------------------------------------------------------------------------- */
-void IRrecv::begin(uint8_t aReceivePin, bool aEnableLEDFeedback, uint8_t aFeedbackLEDPin) {
-    setReceivePin(aReceivePin);
-#if !defined(DISABLE_LED_FEEDBACK_FOR_RECEIVE)
-    setLEDFeedback(aFeedbackLEDPin, aEnableLEDFeedback);
-#else
-    (void)aEnableLEDFeedback;
-    (void)aFeedbackLEDPin;
-#endif
-
-    noInterrupts();
-    IrParamsList().Add(&irparams);  // idempotent
-    interrupts();
-
-    enableIRIn();
-}
-
-void IRrecv::setReceivePin(uint8_t aReceivePinNumber) {
-    if (aReceivePinNumber == IR_INVALID_PIN) {
+void IRrecv::setReceivePin(uint8_t receivePin) {
+    if (receivePin == IR_INVALID_PIN) {
         return;
     }
 
-    irparams.IRReceivePin = aReceivePinNumber;
+    irparams.IRReceivePin = receivePin;
+    pinMode(receivePin, INPUT_PULLUP);
+}
 
-#if defined(__AVR__)
-    irparams.IRReceivePinMask              = digitalPinToBitMask(aReceivePinNumber);
-    irparams.IRReceivePinPortInputRegister = portInputRegister(digitalPinToPort(aReceivePinNumber));
-#endif
+void IRrecv::begin(uint8_t receivePin,
+                   bool enableLedFeedback,
+                   uint8_t feedbackLedPin) {
+    setReceivePin(receivePin);
+    setLEDFeedback(feedbackLedPin, enableLedFeedback);
 
-    // INPUT_PULLUP keeps the pin HIGH (idle) when the IR receiver is
-    // disconnected. Without this a floating pin oscillates randomly, causing
-    // an interrupt storm that blocks the CPU, especially on ESP32.
-    // Most IR receiver modules work correctly with a pull-up.
-    pinMode(aReceivePinNumber, INPUT_PULLUP);
+    noInterrupts();
+    const bool registered = IrReceiverRegistry().Add(this);
+    interrupts();
+
+    if (registered) {
+        enableIRIn();
+    }
 }
 
 void IRrecv::start() {
     enableIRIn();
 }
 
-void IRrecv::start(uint32_t aMicrosecondsToAddToGapCounter) {
+void IRrecv::start(uint32_t microsecondsToAddToGapCounter) {
     enableIRIn();
+
+    const uint32_t additionalTicks =
+        microsecondsToAddToGapCounter / MICROS_PER_TICK;
+
     noInterrupts();
-    irparams.TickCounterForISR += (uint16_t)(aMicrosecondsToAddToGapCounter / MICROS_PER_TICK);
+
+    const uint32_t updatedCounter =
+        static_cast<uint32_t>(irparams.TickCounterForISR) + additionalTicks;
+
+    irparams.TickCounterForISR =
+        updatedCounter > UINT16_MAX
+            ? UINT16_MAX
+            : static_cast<uint16_t>(updatedCounter);
+
     interrupts();
 }
 
@@ -146,56 +103,57 @@ void IRrecv::stop() {
 }
 
 void IRrecv::end() {
-    stop();
+    disableIRIn();
 
     noInterrupts();
-    IrParamsList().Remove(&irparams);
+    IrReceiverRegistry().Remove(this);
     interrupts();
 }
 
-/* -------------------------------------------------------------------------------------------------
- * enableIRIn / disableIRIn  (reference-counted timer ISR management)
- * ------------------------------------------------------------------------------------------------- */
+// ============================================================================
+// Receiver and shared-timer lifecycle
+// ============================================================================
+
 void IRrecv::enableIRIn() {
-    if (irparams.IRReceivePin == IR_INVALID_PIN) {
+    if (irparams.IRReceivePin == IR_INVALID_PIN || isActive) {
         return;
     }
 
     noInterrupts();
 
-
-    // Start the shared timer ISR only when this receiver was not already active.
-    if (!isActive) {
-        isActive = true;
-
-        // Start the shared timer ISR only when the first receiver becomes active.
-        if (gActiveReceivers++ == 0) {
-            timerConfigForReceive();
-            TIMER_ENABLE_RECEIVE_INTR;
-            TIMER_RESET_INTR_PENDING;
+    if (gActiveReceivers == 0) {
+        if (!timerConfigForReceive()) {
+            interrupts();
+            return;
         }
+
+        TIMER_ENABLE_RECEIVE_INTR;
     }
 
-    // Reset only this receiver's state machine; other receivers are unaffected.
     irparams.StateForISR       = IR_REC_STATE_IDLE;
     irparams.TickCounterForISR = 0;
     irparams.OverflowFlag      = false;
     irparams.rawlen            = 0;
 
+    isActive = true;
+    ++gActiveReceivers;
+
     interrupts();
 
-    pinMode(irparams.IRReceivePin, INPUT_PULLUP);  // Pull-up keeps pin stable when IR receiver is disconnected
+    pinMode(irparams.IRReceivePin, INPUT_PULLUP);
 }
 
 void IRrecv::disableIRIn() {
     noInterrupts();
 
-    // Only decrement the shared receiver count if this receiver was active.
     if (isActive) {
         isActive = false;
 
-        // Guard against underflow if disableIRIn() is called without a matching enable.
-        if (gActiveReceivers > 0 && --gActiveReceivers == 0) {
+        if (gActiveReceivers > 0) {
+            --gActiveReceivers;
+        }
+
+        if (gActiveReceivers == 0) {
             TIMER_DISABLE_RECEIVE_INTR;
         }
     }
@@ -204,474 +162,490 @@ void IRrecv::disableIRIn() {
 }
 
 bool IRrecv::isIdle() {
-    return (irparams.StateForISR == IR_REC_STATE_IDLE ||
-            irparams.StateForISR == IR_REC_STATE_STOP);
+    return irparams.StateForISR == IR_REC_STATE_IDLE;
+}
+
+bool IRrecv::available() {
+    return irparams.StateForISR == IR_REC_STATE_STOP;
 }
 
 void IRrecv::resume() {
+    noInterrupts();
+
     if (irparams.StateForISR == IR_REC_STATE_STOP) {
-        irparams.StateForISR = IR_REC_STATE_IDLE;
+        irparams.rawlen       = 0;
+        irparams.OverflowFlag = false;
+        irparams.StateForISR  = IR_REC_STATE_IDLE;
     }
+
+    interrupts();
 }
 
-/* -------------------------------------------------------------------------------------------------
- * initDecodedIRData
- * ------------------------------------------------------------------------------------------------- */
+// ============================================================================
+// Decode initialization and protocol dispatch
+// ============================================================================
+
 void IRrecv::initDecodedIRData() {
     if (irparams.OverflowFlag) {
         irparams.OverflowFlag = false;
         irparams.rawlen       = 0;
         decodedIRData.flags   = IRDATA_FLAGS_WAS_OVERFLOW;
-        DEBUG_PRINTLN(F("Overflow happened"));  // BUG FIX: was a plain string literal, not F() — wasted SRAM
     } else {
-        decodedIRData.flags    = IRDATA_FLAGS_EMPTY;
-        lastDecodedProtocol    = decodedIRData.protocol;
-        lastDecodedCommand     = decodedIRData.command;
-        lastDecodedAddress     = decodedIRData.address;
+        decodedIRData.flags = IRDATA_FLAGS_EMPTY;
+
+        lastDecodedProtocol = decodedIRData.protocol;
+        lastDecodedCommand  = decodedIRData.command;
+        lastDecodedAddress  = decodedIRData.address;
     }
 
-    decodedIRData.protocol      = UNKNOWN;
-    decodedIRData.command       = 0;
-    decodedIRData.address       = 0;
+    decodedIRData.protocol       = UNKNOWN;
+    decodedIRData.command        = 0;
+    decodedIRData.address        = 0;
     decodedIRData.decodedRawData = 0;
-    decodedIRData.numberOfBits  = 0;
+    decodedIRData.numberOfBits   = 0;
 }
 
-/* -------------------------------------------------------------------------------------------------
- * available / read
- * ------------------------------------------------------------------------------------------------- */
-bool IRrecv::available() {
-    return (irparams.StateForISR == IR_REC_STATE_STOP);
+IRData *IRrecv::read() {
+    if (!available()) {
+        return nullptr;
+    }
+
+    return decode() ? &decodedIRData : nullptr;
 }
 
-IRData* IRrecv::read() {
-    if (irparams.StateForISR != IR_REC_STATE_STOP) return nullptr;  // prefer nullptr over NULL in C++
-    if (decode()) return &decodedIRData;
-    return nullptr;
-}
-
-/* -------------------------------------------------------------------------------------------------
- * decode()  —  try each enabled protocol decoder in priority order
- * ------------------------------------------------------------------------------------------------- */
 bool IRrecv::decode() {
-    if (irparams.StateForISR != IR_REC_STATE_STOP) return false;
+    if (!available()) {
+        return false;
+    }
 
     initDecodedIRData();
 
     if (decodedIRData.flags & IRDATA_FLAGS_WAS_OVERFLOW) {
         decodedIRData.protocol = UNKNOWN;
-        return true;  // overflow counts as "data available"
+        return true;
     }
 
 #if defined(DECODE_NEC)
-    if (decodeNEC())          return true;
+    if (decodeNEC()) return true;
 #endif
+
 #if defined(DECODE_PANASONIC) || defined(DECODE_KASEIKYO)
-    if (decodeKaseikyo())     return true;
+    if (decodeKaseikyo()) return true;
 #endif
+
 #if defined(DECODE_DENON)
-    if (decodeDenon())        return true;
+    if (decodeDenon()) return true;
 #endif
+
 #if defined(DECODE_SONY)
-    if (decodeSony())         return true;
+    if (decodeSony()) return true;
 #endif
+
 #if defined(DECODE_RC5)
-    if (decodeRC5())          return true;
+    if (decodeRC5()) return true;
 #endif
+
 #if defined(DECODE_RC6)
-    if (decodeRC6())          return true;
+    if (decodeRC6()) return true;
 #endif
+
 #if defined(DECODE_LG)
-    if (decodeLG())           return true;
+    if (decodeLG()) return true;
 #endif
+
 #if defined(DECODE_JVC)
-    if (decodeJVC())          return true;
+    if (decodeJVC()) return true;
 #endif
+
 #if defined(DECODE_SAMSUNG)
-    if (decodeSamsung())      return true;
+    if (decodeSamsung()) return true;
 #endif
+
 #if defined(DECODE_WHYNTER)
-    if (decodeWhynter())      return true;
+    if (decodeWhynter()) return true;
 #endif
+
 #if defined(DECODE_LEGO_PF)
     if (decodeLegoPowerFunctions()) return true;
 #endif
+
 #if defined(DECODE_BOSEWAVE)
-    if (decodeBoseWave())     return true;
-#endif
-#if defined(DECODE_MAGIQUEST)
-    if (decodeMagiQuest())    return true;
-#endif
-#if defined(DECODE_DISTANCE)
-    if (decodeDistance())     return true;
-#endif
-#if defined(DECODE_HASH)
-    if (decodeHash())         return true;
+    if (decodeBoseWave()) return true;
 #endif
 
-    // BUG FIX: original returned true here unconditionally even when no protocol
-    // matched and DECODE_HASH was disabled — callers had no way to distinguish
-    // "decoded OK" from "unknown protocol with no hash". Return false so callers
-    // can react correctly (e.g. skip, log, or fall through to a raw handler).
+#if defined(DECODE_MAGIQUEST)
+    if (decodeMagiQuest()) return true;
+#endif
+
+#if defined(DECODE_DISTANCE)
+    if (decodeDistance()) return true;
+#endif
+
+#if defined(DECODE_HASH)
+    if (decodeHash()) return true;
+#endif
+
     return false;
 }
 
-/* -------------------------------------------------------------------------------------------------
- * Pulse-width decoder
- * Bit value is encoded in the mark duration (one mark = long, zero mark = short).
- * ------------------------------------------------------------------------------------------------- */
-bool IRrecv::decodePulseWidthData(uint8_t aNumberOfBits, uint8_t aStartOffset,
-                                   uint16_t aOneMarkMicros, uint16_t aZeroMarkMicros,
-                                   uint16_t aBitSpaceMicros, bool aMSBfirst) {
+// ============================================================================
+// Generic pulse-width and pulse-distance decoders
+// ============================================================================
 
-    RAWBUF_DATA_TYPE *tRawBufPointer = &decodedIRData.rawDataPtr->rawbuf[aStartOffset];
-    RAWBUF_DATA_TYPE *tRawBufEnd     = &decodedIRData.rawDataPtr->rawbuf[decodedIRData.rawDataPtr->rawlen];
-    uint32_t tDecodedData = 0;
+bool IRrecv::decodePulseWidthData(uint8_t numberOfBits,
+                                  uint8_t startOffset,
+                                  uint16_t oneMarkMicros,
+                                  uint16_t zeroMarkMicros,
+                                  uint16_t bitSpaceMicros,
+                                  bool msbFirst) {
+    if (numberOfBits == 0 ||
+        numberOfBits > 32 ||
+        startOffset >= irparams.rawlen) {
+        return false;
+    }
 
-    if (aMSBfirst) {
-        for (uint_fast8_t i = 0; i < aNumberOfBits; i++) {
-            // Bounds check before dereferencing
-            if (tRawBufPointer >= tRawBufEnd) return false;
-            if      (matchMark(*tRawBufPointer, aOneMarkMicros))  tDecodedData = (tDecodedData << 1) | 1;
-            else if (matchMark(*tRawBufPointer, aZeroMarkMicros)) tDecodedData = (tDecodedData << 1);
-            else return false;
-            tRawBufPointer++;
+    RAWBUF_DATA_TYPE *raw = &irparams.rawbuf[startOffset];
+    RAWBUF_DATA_TYPE *end = &irparams.rawbuf[irparams.rawlen];
 
-            // Space check (optional on the very last bit)
-            if (tRawBufPointer < tRawBufEnd) {
-                if (!matchSpace(*tRawBufPointer, aBitSpaceMicros)) return false;
-                tRawBufPointer++;
-            }
+    uint32_t decodedData = 0;
+
+    for (uint8_t bitIndex = 0; bitIndex < numberOfBits; ++bitIndex) {
+        if (raw >= end) {
+            return false;
         }
-    } else {
-        for (uint32_t mask = 1UL; aNumberOfBits > 0; mask <<= 1, aNumberOfBits--) {
-            if (tRawBufPointer >= tRawBufEnd) return false;
-            if      (matchMark(*tRawBufPointer, aOneMarkMicros))  tDecodedData |= mask;
-            else if (!matchMark(*tRawBufPointer, aZeroMarkMicros)) return false;
-            tRawBufPointer++;
 
-            if (tRawBufPointer < tRawBufEnd) {
-                if (!matchSpace(*tRawBufPointer, aBitSpaceMicros)) return false;
-                tRawBufPointer++;
+        bool bitValue;
+
+        if (matchMark(*raw, oneMarkMicros)) {
+            bitValue = true;
+        } else if (matchMark(*raw, zeroMarkMicros)) {
+            bitValue = false;
+        } else {
+            return false;
+        }
+
+        ++raw;
+
+        if (msbFirst) {
+            decodedData = (decodedData << 1) | (bitValue ? 1U : 0U);
+        } else if (bitValue) {
+            decodedData |= (1UL << bitIndex);
+        }
+
+        const bool isLastBit = (bitIndex + 1U == numberOfBits);
+
+        if (!isLastBit || raw < end) {
+            if (raw >= end || !matchSpace(*raw, bitSpaceMicros)) {
+                return false;
             }
+
+            ++raw;
         }
     }
 
-    decodedIRData.decodedRawData = tDecodedData;
+    decodedIRData.decodedRawData = decodedData;
     return true;
 }
 
-/* -------------------------------------------------------------------------------------------------
- * Pulse-distance decoder
- * Bit value is encoded in the space duration (one space = long, zero space = short).
- * ------------------------------------------------------------------------------------------------- */
-bool IRrecv::decodePulseDistanceData(uint8_t aNumberOfBits, uint8_t aStartOffset,
-                                      uint16_t aBitMarkMicros, uint16_t aOneSpaceMicros,
-                                      uint16_t aZeroSpaceMicros, bool aMSBfirst) {
+bool IRrecv::decodePulseDistanceData(uint8_t numberOfBits,
+                                     uint8_t startOffset,
+                                     uint16_t bitMarkMicros,
+                                     uint16_t oneSpaceMicros,
+                                     uint16_t zeroSpaceMicros,
+                                     bool msbFirst) {
+    if (numberOfBits == 0 ||
+        numberOfBits > 32 ||
+        startOffset >= irparams.rawlen) {
+        return false;
+    }
 
-    RAWBUF_DATA_TYPE *tRawBufPointer = &decodedIRData.rawDataPtr->rawbuf[aStartOffset];
-    RAWBUF_DATA_TYPE *tRawBufEnd     = &decodedIRData.rawDataPtr->rawbuf[decodedIRData.rawDataPtr->rawlen];
-    uint32_t tDecodedData = 0;
+    RAWBUF_DATA_TYPE *raw = &irparams.rawbuf[startOffset];
+    RAWBUF_DATA_TYPE *end = &irparams.rawbuf[irparams.rawlen];
 
-    if (aMSBfirst) {
-        for (uint_fast8_t i = 0; i < aNumberOfBits; i++) {
-            if (tRawBufPointer >= tRawBufEnd) return false;
-            if (!matchMark(*tRawBufPointer, aBitMarkMicros)) return false;
-            tRawBufPointer++;
+    uint32_t decodedData = 0;
 
-            if (tRawBufPointer >= tRawBufEnd) return false;
-            if      (matchSpace(*tRawBufPointer, aOneSpaceMicros))  tDecodedData = (tDecodedData << 1) | 1;
-            else if (matchSpace(*tRawBufPointer, aZeroSpaceMicros)) tDecodedData = (tDecodedData << 1);
-            else return false;
-            tRawBufPointer++;
+    for (uint8_t bitIndex = 0; bitIndex < numberOfBits; ++bitIndex) {
+        if (raw >= end || !matchMark(*raw, bitMarkMicros)) {
+            return false;
         }
-    } else {
-        for (uint32_t mask = 1UL; aNumberOfBits > 0; mask <<= 1, aNumberOfBits--) {
-            if (tRawBufPointer >= tRawBufEnd) return false;
-            if (!matchMark(*tRawBufPointer, aBitMarkMicros)) return false;
-            tRawBufPointer++;
 
-            if (tRawBufPointer >= tRawBufEnd) return false;
-            if      (matchSpace(*tRawBufPointer, aOneSpaceMicros))  tDecodedData |= mask;
-            else if (!matchSpace(*tRawBufPointer, aZeroSpaceMicros)) return false;
-            tRawBufPointer++;
+        ++raw;
+
+        if (raw >= end) {
+            return false;
+        }
+
+        bool bitValue;
+
+        if (matchSpace(*raw, oneSpaceMicros)) {
+            bitValue = true;
+        } else if (matchSpace(*raw, zeroSpaceMicros)) {
+            bitValue = false;
+        } else {
+            return false;
+        }
+
+        ++raw;
+
+        if (msbFirst) {
+            decodedData = (decodedData << 1) | (bitValue ? 1U : 0U);
+        } else if (bitValue) {
+            decodedData |= (1UL << bitIndex);
         }
     }
 
-    decodedIRData.decodedRawData = tDecodedData;
+    decodedIRData.decodedRawData = decodedData;
     return true;
 }
 
-/* -------------------------------------------------------------------------------------------------
- * Biphase helpers (used by RC5 / RC6 decoders)
- * ------------------------------------------------------------------------------------------------- */
-uint8_t  sBiphaseDecodeRawbuffOffset;
-uint16_t sCurrentTimingIntervals;
-uint8_t  sUsedTimingIntervals;
-uint16_t sBiphaseTimeUnit;
+// ============================================================================
+// Biphase decoder helpers
+// ============================================================================
 
-void IRrecv::initBiphaselevel(uint8_t aRCDecodeRawbuffOffset, uint16_t aBiphaseTimeUnit) {
-    sBiphaseDecodeRawbuffOffset = aRCDecodeRawbuffOffset;
-    sBiphaseTimeUnit            = aBiphaseTimeUnit;
+uint8_t sBiphaseDecodeRawbuffOffset;
+
+static uint16_t sCurrentTimingIntervals;
+static uint16_t sBiphaseTimeUnit;
+static uint8_t sUsedTimingIntervals;
+
+void IRrecv::initBiphaselevel(uint8_t rawBufferOffset,
+                              uint16_t biphaseTimeUnit) {
+    sBiphaseDecodeRawbuffOffset = rawBufferOffset;
+    sBiphaseTimeUnit            = biphaseTimeUnit;
     sUsedTimingIntervals        = 0;
 }
 
 uint8_t IRrecv::getBiphaselevel() {
-    if (sBiphaseDecodeRawbuffOffset >= decodedIRData.rawDataPtr->rawlen) return SPACE;
+    if (sBiphaseDecodeRawbuffOffset >= irparams.rawlen) {
+        return SPACE;
+    }
 
-    uint8_t tLevel = (sBiphaseDecodeRawbuffOffset & 1);
+    const uint8_t level = sBiphaseDecodeRawbuffOffset & 1U;
 
     if (sUsedTimingIntervals == 0) {
-        uint16_t tCurrent = decodedIRData.rawDataPtr->rawbuf[sBiphaseDecodeRawbuffOffset];
-        int16_t  corr     = (tLevel == MARK) ? MARK_EXCESS_MICROS : -MARK_EXCESS_MICROS;
+        const uint16_t currentTicks =
+            irparams.rawbuf[sBiphaseDecodeRawbuffOffset];
 
-        if      (matchTicks(tCurrent,     sBiphaseTimeUnit + corr)) sCurrentTimingIntervals = 1;
-        else if (matchTicks(tCurrent, 2 * sBiphaseTimeUnit + corr)) sCurrentTimingIntervals = 2;
-        else if (matchTicks(tCurrent, 3 * sBiphaseTimeUnit + corr)) sCurrentTimingIntervals = 3;
-        else return (uint8_t)-1;  // no match — signal a decode error to the caller
+        const int16_t correction =
+            level == MARK ? MARK_EXCESS_MICROS : -MARK_EXCESS_MICROS;
+
+        if (matchTicks(currentTicks, sBiphaseTimeUnit + correction)) {
+            sCurrentTimingIntervals = 1;
+        } else if (matchTicks(
+                       currentTicks,
+                       (2U * sBiphaseTimeUnit) + correction)) {
+            sCurrentTimingIntervals = 2;
+        } else if (matchTicks(
+                       currentTicks,
+                       (3U * sBiphaseTimeUnit) + correction)) {
+            sCurrentTimingIntervals = 3;
+        } else {
+            return 0xFF;
+        }
     }
 
-    sUsedTimingIntervals++;
+    ++sUsedTimingIntervals;
+
     if (sUsedTimingIntervals >= sCurrentTimingIntervals) {
         sUsedTimingIntervals = 0;
-        sBiphaseDecodeRawbuffOffset++;
+        ++sBiphaseDecodeRawbuffOffset;
     }
-    return tLevel;
+
+    return level;
 }
 
-/* -------------------------------------------------------------------------------------------------
- * Hash decoder  (FNV-1 32-bit, protocol-agnostic fingerprint)
- * ------------------------------------------------------------------------------------------------- */
+// ============================================================================
+// Hash decoder
+// ============================================================================
+
 #if defined(DECODE_HASH)
-uint8_t IRrecv::compare(unsigned int oldval, unsigned int newval) {
-    if (newval * 10 < oldval * 8) return 0;
-    if (oldval * 10 < newval * 8) return 2;
+
+uint8_t IRrecv::compare(unsigned int oldValue, unsigned int newValue) {
+    if (newValue * 10U < oldValue * 8U) {
+        return 0;
+    }
+
+    if (oldValue * 10U < newValue * 8U) {
+        return 2;
+    }
+
     return 1;
 }
 
-// FNV-1 32-bit constants (https://en.wikipedia.org/wiki/Fowler–Noll–Vo_hash_function)
-#define FNV_PRIME_32 16777619UL
-#define FNV_BASIS_32 2166136261UL
-
 bool IRrecv::decodeHash() {
-    if (decodedIRData.rawDataPtr->rawlen < 6) return false;
+    if (irparams.rawlen < 6) {
+        return false;
+    }
 
-    uint32_t hash = FNV_BASIS_32;  // BUG FIX: was declared as plain `long` (signed, 16-bit on AVR).
-                                   // FNV_BASIS_32 (2166136261) exceeds INT16_MAX and INT32_MAX on AVR,
-                                   // causing silent overflow. uint32_t is the correct type.
+    static constexpr uint32_t FNV_PRIME = 16777619UL;
+    static constexpr uint32_t FNV_BASIS = 2166136261UL;
 
-#if RAW_BUFFER_LENGTH <= 254
-    uint8_t  i;
-#else
-    uint16_t i;
-#endif
-    for (i = 1; (i + 2) < decodedIRData.rawDataPtr->rawlen; i++) {
-        uint8_t value = compare(decodedIRData.rawDataPtr->rawbuf[i],
-                                decodedIRData.rawDataPtr->rawbuf[i + 2]);
-        hash = (hash * FNV_PRIME_32) ^ value;
+    uint32_t hash = FNV_BASIS;
+
+    for (uint16_t index = 1; index + 2U < irparams.rawlen; ++index) {
+        hash = (hash * FNV_PRIME) ^
+               compare(irparams.rawbuf[index],
+                       irparams.rawbuf[index + 2U]);
     }
 
     decodedIRData.decodedRawData = hash;
     decodedIRData.numberOfBits   = 32;
     decodedIRData.protocol       = UNKNOWN;
+
     return true;
 }
-#endif  // DECODE_HASH
 
-/* -------------------------------------------------------------------------------------------------
- * Tick / microsecond matching functions
- * ------------------------------------------------------------------------------------------------- */
-bool matchTicks(uint16_t aMeasuredTicks, uint16_t aMatchValueMicros) {
-    return (aMeasuredTicks >= TICKS_LOW(aMatchValueMicros) &&
-            aMeasuredTicks <= TICKS_HIGH(aMatchValueMicros));
+#endif
+
+// ============================================================================
+// Timing comparison helpers
+// ============================================================================
+
+bool matchTicks(uint16_t measuredTicks, uint16_t desiredMicros) {
+    return measuredTicks >= TICKS_LOW(desiredMicros) &&
+           measuredTicks <= TICKS_HIGH(desiredMicros);
 }
 
-// Legacy name aliases
-bool MATCH(uint16_t measured_ticks, uint16_t desired_us) {
-    return matchTicks(measured_ticks, desired_us);
+bool MATCH(uint16_t measuredTicks, uint16_t desiredMicros) {
+    return matchTicks(measuredTicks, desiredMicros);
 }
 
-bool matchMark(uint16_t aMeasuredTicks, uint16_t aMatchValueMicros) {
-    return (aMeasuredTicks >= TICKS_LOW(aMatchValueMicros + MARK_EXCESS_MICROS) &&
-            aMeasuredTicks <= TICKS_HIGH(aMatchValueMicros + MARK_EXCESS_MICROS));
+bool matchMark(uint16_t measuredTicks, uint16_t desiredMicros) {
+    const uint16_t compensatedMicros =
+        desiredMicros + MARK_EXCESS_MICROS;
+
+    return measuredTicks >= TICKS_LOW(compensatedMicros) &&
+           measuredTicks <= TICKS_HIGH(compensatedMicros);
 }
 
-bool MATCH_MARK(uint16_t measured_ticks, uint16_t desired_us) {
-    return matchMark(measured_ticks, desired_us);
+bool MATCH_MARK(uint16_t measuredTicks, uint16_t desiredMicros) {
+    return matchMark(measuredTicks, desiredMicros);
 }
 
-bool matchSpace(uint16_t aMeasuredTicks, uint16_t aMatchValueMicros) {
-    // Protect against unsigned underflow when MARK_EXCESS_MICROS > aMatchValueMicros
-    if (aMatchValueMicros < MARK_EXCESS_MICROS) return false;  // BUG FIX: was silent underflow → wrong ticks
-    return (aMeasuredTicks >= TICKS_LOW(aMatchValueMicros - MARK_EXCESS_MICROS) &&
-            aMeasuredTicks <= TICKS_HIGH(aMatchValueMicros - MARK_EXCESS_MICROS));
+bool matchSpace(uint16_t measuredTicks, uint16_t desiredMicros) {
+    if (desiredMicros < MARK_EXCESS_MICROS) {
+        return false;
+    }
+
+    const uint16_t compensatedMicros =
+        desiredMicros - MARK_EXCESS_MICROS;
+
+    return measuredTicks >= TICKS_LOW(compensatedMicros) &&
+           measuredTicks <= TICKS_HIGH(compensatedMicros);
 }
 
-bool MATCH_SPACE(uint16_t measured_ticks, uint16_t desired_us) {
-    return matchSpace(measured_ticks, desired_us);
+bool MATCH_SPACE(uint16_t measuredTicks, uint16_t desiredMicros) {
+    return matchSpace(measuredTicks, desiredMicros);
 }
 
 int getMarkExcessMicros() {
     return MARK_EXCESS_MICROS;
 }
 
-/* -------------------------------------------------------------------------------------------------
- * MICROS_PER_TICK runtime accessor
- * Allows protocol decoders to query the active tick resolution without
- * hard-coding the macro value (important for multi-receiver configurations).
- * ------------------------------------------------------------------------------------------------- */
 int getMICROS_PER_TICK() {
     return MICROS_PER_TICK;
 }
 
-/* -------------------------------------------------------------------------------------------------
- * MultiIR ISR helpers
- * Port registers are read once per interrupt (PINB/PINC/PIND on AVR) and
- * then shared across all receiver state machines to save cycles.
- * ------------------------------------------------------------------------------------------------- */
-#if defined(ESP32)
-#include "driver/gpio.h"
-#endif
+// ============================================================================
+// Receiver state machine used by the timer ISR
+// ============================================================================
 
-static inline uint8_t readInputLevelFor(irparams_struct &p,
-                                        uint8_t pinb, uint8_t pinc, uint8_t pind) {
-#if defined(__AVR__)
-
-    if (p.IRReceivePinPortInputRegister == &PINB) return (pinb & p.IRReceivePinMask);
-    if (p.IRReceivePinPortInputRegister == &PINC) return (pinc & p.IRReceivePinMask);
-    return (pind & p.IRReceivePinMask);
-
-#elif defined(ESP32)
-
-    (void)pinb;
-    (void)pinc;
-    (void)pind;
-
-    return (uint8_t)gpio_get_level((gpio_num_t)p.IRReceivePin);
-
-#else
-
-    (void)pinb;
-    (void)pinc;
-    (void)pind;
-    return (uint8_t)digitalRead(p.IRReceivePin);
-
-#endif
+static inline void discardFrame(irparams_struct &params) {
+    params.OverflowFlag      = false;
+    params.rawlen            = 0;
+    params.TickCounterForISR = 0;
+    params.StateForISR       = IR_REC_STATE_IDLE;
 }
 
-static inline void ProcessOneIRParam(irparams_struct &p, uint8_t tIRInputLevel) {
-    // Increment tick counter, saturate at 0xFFFF to prevent wraparound
-    if (p.TickCounterForISR < 0xFFFF) p.TickCounterForISR++;
+static inline void processReceiver(irparams_struct &params,
+                                   uint8_t inputLevel) {
+    if (params.TickCounterForISR < UINT16_MAX) {
+        ++params.TickCounterForISR;
+    }
 
-    switch (p.StateForISR) {
+    switch (params.StateForISR) {
+        case IR_REC_STATE_IDLE:
+            if (inputLevel == INPUT_MARK) {
+                if (params.TickCounterForISR > RECORD_GAP_TICKS) {
+                    params.OverflowFlag = false;
+                    params.rawbuf[0] =
+                        clampTicksToRawbuf(params.TickCounterForISR);
+                    params.rawlen      = 1;
+                    params.StateForISR = IR_REC_STATE_MARK;
+                }
 
-    case IR_REC_STATE_IDLE:
-        if (tIRInputLevel == INPUT_MARK) {
-            if (p.TickCounterForISR > RECORD_GAP_TICKS) {
-                // Valid inter-command gap seen — start recording a new frame
-                p.OverflowFlag  = false;
-                p.rawbuf[0]     = clampTicksToRawbuf(p.TickCounterForISR);
-                p.rawlen        = 1;
-                p.StateForISR   = IR_REC_STATE_MARK;
+                params.TickCounterForISR = 0;
             }
-            p.TickCounterForISR = 0;
-        }
-        break;
-
-    case IR_REC_STATE_MARK:
-      if (tIRInputLevel != INPUT_MARK) {
-        if (p.TickCounterForISR < MIN_SIGNAL_TICKS) {
-            p.TickCounterForISR = 0;
             break;
-        }
-        if (p.rawlen >= RAW_BUFFER_LENGTH) {
-    // Overflow from noise or an overlong frame.
-    // Silently discard this frame and self-recover immediately.
-    // Do NOT set OverflowFlag here, because we are not entering STOP,
-    // so decode() will not report this overflow to the application.
-    p.OverflowFlag       = false;
-    p.rawlen             = 0;
-    p.TickCounterForISR  = 0;
-    p.StateForISR        = IR_REC_STATE_IDLE;
-} else {
-    p.rawbuf[p.rawlen++] = clampTicksToRawbuf(p.TickCounterForISR);
-    p.StateForISR        = IR_REC_STATE_SPACE;
-}
-        p.TickCounterForISR = 0;
-    }
-    break;
 
-case IR_REC_STATE_SPACE:
-    if (tIRInputLevel == INPUT_MARK) {
-        if (p.TickCounterForISR < MIN_SIGNAL_TICKS) {
-            p.TickCounterForISR = 0;
+        case IR_REC_STATE_MARK:
+            if (inputLevel != INPUT_MARK) {
+                if (params.TickCounterForISR < MIN_SIGNAL_TICKS ||
+                    params.rawlen >= RAW_BUFFER_LENGTH) {
+                    discardFrame(params);
+                    break;
+                }
+
+                params.rawbuf[params.rawlen++] =
+                    clampTicksToRawbuf(params.TickCounterForISR);
+
+                params.TickCounterForISR = 0;
+                params.StateForISR       = IR_REC_STATE_SPACE;
+            }
             break;
-        }
-        if (p.rawlen >= RAW_BUFFER_LENGTH) {
-    // Overflow from noise or an overlong frame.
-    // Silently discard this frame and self-recover immediately.
-    // Do NOT set OverflowFlag here, because we are not entering STOP,
-    // so decode() will not report this overflow to the application.
-    p.OverflowFlag       = false;
-    p.rawlen             = 0;
-    p.TickCounterForISR  = 0;
-    p.StateForISR        = IR_REC_STATE_IDLE;
-} else {
-    p.rawbuf[p.rawlen++] = clampTicksToRawbuf(p.TickCounterForISR);
-    p.StateForISR        = IR_REC_STATE_MARK;
-}
-        p.TickCounterForISR = 0;
-    } else if (p.TickCounterForISR > RECORD_GAP_TICKS) {
-        p.StateForISR = IR_REC_STATE_STOP;  // legitimate frame end — keep STOP
-    }
-    break;
 
-    case IR_REC_STATE_STOP:
-        // Waiting for resume(); swallow any spurious marks
-        if (tIRInputLevel == INPUT_MARK) {
-            p.TickCounterForISR = 0;
-        }
-        break;
+        case IR_REC_STATE_SPACE:
+            if (inputLevel == INPUT_MARK) {
+                if (params.TickCounterForISR < MIN_SIGNAL_TICKS ||
+                    params.rawlen >= RAW_BUFFER_LENGTH) {
+                    discardFrame(params);
+                    break;
+                }
 
-    default:
-        // Should never happen — reset to safe state
-        p.StateForISR = IR_REC_STATE_IDLE;
-        break;
+                params.rawbuf[params.rawlen++] =
+                    clampTicksToRawbuf(params.TickCounterForISR);
+
+                params.TickCounterForISR = 0;
+                params.StateForISR       = IR_REC_STATE_MARK;
+            } else if (params.TickCounterForISR > RECORD_GAP_TICKS) {
+                params.StateForISR = IR_REC_STATE_STOP;
+            }
+            break;
+
+        case IR_REC_STATE_STOP:
+            if (inputLevel == INPUT_MARK) {
+                params.TickCounterForISR = 0;
+            }
+            break;
+
+        default:
+            discardFrame(params);
+            break;
     }
 }
 
-/* -------------------------------------------------------------------------------------------------
- * Timer ISR — fired once per MICROS_PER_TICK by the hardware timer
- * ------------------------------------------------------------------------------------------------- */
-#if defined(TIMER_INTR_NAME)
-ISR(TIMER_INTR_NAME)
-#else
-ISR()
-#endif
-{
-    TIMER_RESET_INTR_PENDING;  // acknowledge the interrupt before any work
+// ============================================================================
+// Shared ESP32 timer interrupt handler
+// ============================================================================
 
-#if defined(__AVR__)
-    // Snapshot all port registers once to minimise time inside the ISR
-    const uint8_t pinb = PINB;
-    const uint8_t pinc = PINC;
-    const uint8_t pind = PIND;
-#else
-    const uint8_t pinb = 0, pinc = 0, pind = 0;
-#endif
+ARDUINO_ISR_ATTR void IRTimerInterruptHandler() {
+    for (uint8_t index = 0;
+         index < IrReceiverRegistry().Capacity();
+         ++index) {
+        IRrecv *receiver = IrReceiverRegistry().GetItem(index);
 
-    const int n = IrParamsList().GetCount();
-    for (int i = 0; i < n; ++i) {
-    irparams_struct *pp = IrParamsList().GetItem(i);
-    if (!pp) continue;  // defensive: skip any null entries
+        if (receiver == nullptr ||
+            !receiver->isActive ||
+            receiver->irparams.IRReceivePin == IR_INVALID_PIN) {
+            continue;
+        }
 
-    // Skip default/global receivers that have not been assigned a real pin yet.
-    if (pp->IRReceivePin == IR_INVALID_PIN) continue;
+        const uint8_t inputLevel = static_cast<uint8_t>(
+            gpio_get_level(
+                static_cast<gpio_num_t>(receiver->irparams.IRReceivePin)));
 
-    ProcessOneIRParam(*pp, readInputLevelFor(*pp, pinb, pinc, pind));
-  }
+        processReceiver(receiver->irparams, inputLevel);
+    }
 }
-
-/** @} */
 
 #endif // IR_RECEIVE_HPP
