@@ -3,10 +3,10 @@
 #define NEZAIR_H
 
 // -------------------- Version --------------------
-#define VERSION_NEZAIR "2.2.2"
+#define VERSION_NEZAIR "2.4.0"
 #define VERSION_NEZAIR_MAJOR 2
-#define VERSION_NEZAIR_MINOR 2
-#define VERSION_NEZAIR_PATCH 2
+#define VERSION_NEZAIR_MINOR 4
+#define VERSION_NEZAIR_PATCH 0
 
 // -------------------- Multi-IR defaults --------------------
 #ifndef IR_MAXCOUNTIR
